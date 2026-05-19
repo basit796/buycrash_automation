@@ -1,461 +1,475 @@
 """
 searcher.py
 -----------
-Handles login, navigation, CAPTCHA solving, and search
-using SeleniumBase CDP Mode for stealth.
+Strategy:
+1. Login ONCE via browser UI — save cookies to file
+2. On next run — load cookies from file, skip login if still valid
+3. For each report — solve reCAPTCHA via 2Captcha → call API directly
+4. Browser stays open entire session (no re-login per batch)
 """
+import os
 import time
 import json
-import uuid
+import pickle
 import requests
 from seleniumbase import SB
 from config import (
     USERNAME, get_password,
-    BASE_URL, LOGIN_URL, SEARCH_PAGE_URL, SEARCH_API_URL,
+    BASE_URL, SEARCH_PAGE_URL, SEARCH_API_URL,
     STATE, JURISDICTION,
     get_report_type_label,
+    CAPTCHA_API_KEY, CAPTCHA_SITE_KEY,
 )
 
+COOKIES_FILE = "session_cookies.pkl"
+
 
 # -------------------------------------------------------------------
-# MAIN SESSION
+# COOKIE PERSISTENCE — save/load so we skip login on next run
 # -------------------------------------------------------------------
 
-def run_search_session(report_numbers: list, found_callback, not_found_callback) -> int:
+def save_cookies(cookies: dict):
+    """Save cookies to disk for reuse next run."""
+    with open(COOKIES_FILE, "wb") as f:
+        pickle.dump(cookies, f)
+    print(f"   💾 Session cookies saved to {COOKIES_FILE}")
+
+
+def load_cookies() -> dict:
+    """Load cookies from disk if available."""
+    if os.path.exists(COOKIES_FILE):
+        with open(COOKIES_FILE, "rb") as f:
+            cookies = pickle.load(f)
+        print(f"   📂 Loaded saved cookies from {COOKIES_FILE}")
+        return cookies
+    return {}
+
+
+def delete_cookies():
+    """Delete saved cookies (force re-login next run)."""
+    if os.path.exists(COOKIES_FILE):
+        os.remove(COOKIES_FILE)
+        print("   🗑️  Deleted saved cookies")
+
+
+def _test_session(api_session: requests.Session) -> bool:
     """
-    Opens browser, logs in via UI, then searches each report number.
-    Returns number of found reports.
+    Quick check if our session cookies are still valid
+    by calling the user session endpoint.
     """
-    found_count = 0
-
-    with SB(uc=True, test=False, locale="en", headless=False) as sb:
-
-        # ── Step 1: Login via UI ──────────────────────────────────
-        _login_via_ui(sb)
-
-        # ── Step 2: Go to search page ─────────────────────────────
-        print(f"\n🌐 Navigating to search page...")
-        sb.cdp.open(SEARCH_PAGE_URL)
-        sb.sleep(4)
-
-        # Extract cookies for API calls
-        api_session = _build_api_session(sb)
-
-        print(f"📋 Processing {len(report_numbers)} report numbers...")
-
-        # ── Step 3: Loop through report numbers ───────────────────
-        for report_num in report_numbers:
-            report_str = str(report_num)
-            print(f"\n🔍 Checking report number: {report_str}")
-
-            try:
-                result = _search_single_report(sb, api_session, report_str)
-
-                if result is not None:
-                    found_count += 1
-                    found_callback(result)
-                    print(f"   ✅ Found {found_count} valid report(s) so far")
-                else:
-                    not_found_callback(report_str)
-
-            except Exception as e:
-                print(f"   ⚠️  Error on report {report_str}: {e}")
-                not_found_callback(report_str)
-                # Reload search page and continue
-                try:
-                    sb.cdp.open(SEARCH_PAGE_URL)
-                    sb.sleep(4)
-                    api_session = _build_api_session(sb)
-                except Exception:
-                    pass
-
-            time.sleep(2)
-
-    return found_count
-
-
-# -------------------------------------------------------------------
-# LOGIN via UI clicks
-# -------------------------------------------------------------------
-
-def _login_via_ui(sb):
-    """Click Sign In button, fill credentials, submit."""
-    print(f"🔐 Opening home page...")
-    sb.activate_cdp_mode(BASE_URL + "/ui/home")
-    sb.sleep(4)
-
-    # Click the "Sign In" button/dropdown in the navbar
-    print("   Clicking Sign In button...")
-    sign_in_selectors = [
-        "button.sign-in-btn",
-        "a.sign-in",
-        "button:contains('Sign In')",
-        ".sign-in-button",
-        "button[id*='sign']",
-        "a[href*='sign']",
-        # Generic — visible button with Sign In text
-        "button",
-    ]
-
-    clicked = False
-    for selector in sign_in_selectors:
-        try:
-            # Try finding by text content first
-            if selector == "button":
-                # Find all buttons and click the one with Sign In text
-                sb.cdp.find_element_by_text("Sign In").click()
-                clicked = True
-                print(f"   ✅ Clicked Sign In via text search")
-                break
-            else:
-                sb.cdp.click(selector)
-                clicked = True
-                print(f"   ✅ Clicked Sign In via: {selector}")
-                break
-        except Exception:
-            continue
-
-    if not clicked:
-        # Last resort: gui click
-        print("   Trying GUI click on Sign In...")
-        try:
-            sb.cdp.gui_click_element("button")
-        except Exception as e:
-            print(f"   ⚠️  Could not click Sign In: {e}")
-
-    sb.sleep(2)
-
-    # Fill User ID field
-    print(f"   Filling User ID: {USERNAME}")
-    user_id_selectors = [
-        "input[placeholder='User ID']",
-        "input[name='username']",
-        "input[id='username']",
-        "input[type='text']",
-        "input[autocomplete='username']",
-    ]
-    for selector in user_id_selectors:
-        try:
-            sb.cdp.type(selector, USERNAME)
-            print(f"   ✅ Filled User ID via: {selector}")
-            break
-        except Exception:
-            continue
-
-    sb.sleep(0.5)
-
-    # Fill Password field
-    print("   Filling Password...")
-    password_selectors = [
-        "input[placeholder='Password']",
-        "input[name='password']",
-        "input[id='password']",
-        "input[type='password']",
-        "input[autocomplete='current-password']",
-    ]
-    for selector in password_selectors:
-        try:
-            sb.cdp.type(selector, get_password())
-            print(f"   ✅ Filled Password via: {selector}")
-            break
-        except Exception:
-            continue
-
-    sb.sleep(0.5)
-
-    # Click the Sign In submit button inside the form
-    print("   Submitting login form...")
-    submit_selectors = [
-        "button[type='submit']",
-        "input[type='submit']",
-        "button.btn-primary",
-        "button.login-btn",
-    ]
-
-    submitted = False
-    for selector in submit_selectors:
-        try:
-            sb.cdp.click(selector)
-            submitted = True
-            print(f"   ✅ Submitted via: {selector}")
-            break
-        except Exception:
-            continue
-
-    if not submitted:
-        # Try clicking by text
-        try:
-            sb.cdp.find_element_by_text("Sign In", tag_name="button").click()
-            submitted = True
-            print("   ✅ Submitted via text search")
-        except Exception:
-            pass
-
-    if not submitted:
-        # Press Enter on password field
-        try:
-            sb.cdp.evaluate(
-                "document.querySelector('input[type=\"password\"]').dispatchEvent("
-                "new KeyboardEvent('keypress', {key: 'Enter', keyCode: 13, bubbles: true}))"
-            )
-            print("   ✅ Submitted via Enter key")
-        except Exception as e:
-            print(f"   ⚠️  Submit failed: {e}")
-
-    print("   ⏳ Waiting for login to complete...")
-    sb.sleep(5)
-
-    # Verify login succeeded by checking URL or page content
     try:
-        current_url = sb.cdp.get_current_url()
-        print(f"   📍 Current URL after login: {current_url}")
-
-        page_text = sb.cdp.get_text("body")
-        if "Sign In" in page_text[:100] and "User ID" in page_text:
-            print("   ⚠️  Still on login page — login may have failed")
-        else:
-            print("   ✅ Login appears successful!")
-    except Exception:
-        pass
-
-
-# -------------------------------------------------------------------
-# BUILD API SESSION from browser cookies
-# -------------------------------------------------------------------
-
-def _build_api_session(sb) -> requests.Session:
-    """Extract browser cookies into a requests.Session for API calls."""
-    api_session = requests.Session()
-    try:
-        browser_cookies = sb.cdp.get_all_cookies()
-        for cookie in browser_cookies:
-            api_session.cookies.set(
-                cookie.get("name", ""),
-                cookie.get("value", ""),
-                domain="buycrash.lexisnexisrisk.com",
-            )
-        print(f"   🍪 {len(browser_cookies)} cookies extracted for API session")
+        resp = api_session.get(
+            f"{BASE_URL}/gateway/nossop/session/user",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("loginId"):
+                print(f"   ✅ Session valid — logged in as: {data.get('loginId')}")
+                return True
+        print(f"   ⚠️  Session check returned {resp.status_code}")
+        return False
     except Exception as e:
-        print(f"   ⚠️  Cookie extraction error: {e}")
+        print(f"   ⚠️  Session check error: {e}")
+        return False
 
-    try:
-        ua = sb.cdp.get_user_agent()
-        api_session.headers.update({
-            "User-Agent": ua,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Referer": SEARCH_PAGE_URL,
-            "Origin": BASE_URL,
-        })
-    except Exception:
-        pass
 
+# -------------------------------------------------------------------
+# BUILD requests.Session from cookie dict
+# -------------------------------------------------------------------
+
+def _build_api_session_from_dict(cookie_dict: dict,
+                                  user_agent: str = None) -> requests.Session:
+    api_session = requests.Session()
+    for name, value in cookie_dict.items():
+        api_session.cookies.set(
+            name, value, domain="buycrash.lexisnexisrisk.com"
+        )
+    ua = user_agent or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    api_session.headers.update({
+        "User-Agent": ua,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Referer": SEARCH_PAGE_URL,
+        "Origin": BASE_URL,
+    })
     return api_session
 
 
 # -------------------------------------------------------------------
-# SEARCH A SINGLE REPORT
+# EXTRACT COOKIES from browser into a plain dict
 # -------------------------------------------------------------------
 
-def _search_single_report(sb, api_session: requests.Session, report_number: str):
-    """
-    Fill report number, solve CAPTCHA properly, submit,
-    call API and return parsed record or None.
-    """
-
-    # ── Clear and fill report number ─────────────────────────────
-    report_input_selectors = [
-        "input[name='reportNumber']",
-        "input[placeholder*='Report']",
-        "input[id*='report']",
-        "div.option-1 input",
-        "div.option1 input",
-        ".search-option:first-child input",
-    ]
-
-    filled = False
-    for selector in report_input_selectors:
-        try:
-            sb.cdp.clear(selector)
-            sb.cdp.type(selector, report_number)
-            filled = True
-            print(f"   ✏️  Filled report number via: {selector}")
-            break
-        except Exception:
-            continue
-
-    if not filled:
-        # Try clicking first visible text input and typing
-        try:
-            sb.cdp.evaluate(f"""
-                var inputs = document.querySelectorAll('input[type="text"]');
-                if (inputs.length > 0) {{
-                    inputs[0].focus();
-                    inputs[0].value = '{report_number}';
-                    inputs[0].dispatchEvent(new Event('input', {{bubbles: true}}));
-                    inputs[0].dispatchEvent(new Event('change', {{bubbles: true}}));
-                }}
-            """)
-            print(f"   ✏️  Filled report number via JS evaluate")
-            filled = True
-        except Exception as e:
-            print(f"   ⚠️  Could not fill report number: {e}")
-
-    sb.sleep(1)
-
-    # ── Solve CAPTCHA properly ────────────────────────────────────
-    print("   🤖 Solving CAPTCHA — please wait...")
-
-    captcha_token = None
-
-    # Method 1: SeleniumBase built-in solve_captcha
+def _extract_cookies_from_browser(sb) -> dict:
+    """Pull cookies from SeleniumBase browser into a plain dict."""
+    cookie_dict = {}
     try:
-        sb.cdp.solve_captcha()
-        sb.sleep(3)
-        print("   ✅ solve_captcha() completed")
+        raw = sb.cdp.get_all_cookies()
+        for c in raw:
+            try:
+                # Handle both object-style and dict-style cookies
+                name  = c.name  if hasattr(c, "name")  else c.get("name", "")
+                value = c.value if hasattr(c, "value") else c.get("value", "")
+                if name and value:
+                    cookie_dict[name] = value
+            except Exception:
+                pass
+        print(f"   🍪 Extracted {len(cookie_dict)} cookies from browser")
     except Exception as e:
-        print(f"   ⚠️  solve_captcha() error: {e}")
+        print(f"   ⚠️  Cookie extraction error: {e}")
+    return cookie_dict
 
-    # Wait for CAPTCHA token to be populated (up to 30 seconds)
-    print("   ⏳ Waiting for CAPTCHA token...")
-    for attempt in range(30):
-        try:
-            token = sb.cdp.evaluate(
-                "document.getElementById('g-recaptcha-response') ? "
-                "document.getElementById('g-recaptcha-response').value : ''"
-            )
-            if token and len(token) > 50:
-                captcha_token = token
-                print(f"   ✅ CAPTCHA token obtained! (length: {len(token)})")
+
+# -------------------------------------------------------------------
+# LOGIN via browser UI — only called when no valid session exists
+# -------------------------------------------------------------------
+
+def _login_via_browser() -> dict:
+    """
+    Opens browser, logs in, extracts and returns cookie dict.
+    Browser is opened and closed just for login.
+    """
+    cookie_dict = {}
+    user_agent  = None
+
+    with SB(uc=True, test=False, locale="en", headless=False) as sb:
+        print(f"🔐 Opening browser for login...")
+        sb.activate_cdp_mode(BASE_URL + "/ui/home")
+        sb.sleep(4)
+
+        # ── Click Sign In button ──────────────────────────────────
+        print("   Clicking Sign In button...")
+        clicked = False
+
+        # Try multiple strategies
+        strategies = [
+            lambda: sb.cdp.find_element_by_text("Sign In").click(),
+            lambda: sb.cdp.click("button:contains('Sign In')"),
+            lambda: sb.cdp.gui_click_element("button:contains('Sign In')"),
+        ]
+        for strategy in strategies:
+            try:
+                strategy()
+                clicked = True
+                print("   ✅ Clicked Sign In")
                 break
+            except Exception:
+                continue
+
+        if not clicked:
+            print("   ⚠️  Could not click Sign In button")
+
+        sb.sleep(2)
+
+        # ── Fill User ID ──────────────────────────────────────────
+        print(f"   Filling User ID: {USERNAME}")
+        for sel in ["input[placeholder='User ID']",
+                    "input[name='username']",
+                    "input[type='text']"]:
+            try:
+                sb.cdp.click(sel)
+                sb.sleep(0.3)
+                sb.cdp.type(sel, USERNAME)
+                print(f"   ✅ Filled User ID")
+                break
+            except Exception:
+                continue
+
+        sb.sleep(0.5)
+
+        # ── Fill Password ─────────────────────────────────────────
+        print("   Filling Password...")
+        for sel in ["input[placeholder='Password']",
+                    "input[name='password']",
+                    "input[type='password']"]:
+            try:
+                sb.cdp.click(sel)
+                sb.sleep(0.3)
+                sb.cdp.type(sel, get_password())
+                print(f"   ✅ Filled Password")
+                break
+            except Exception:
+                continue
+
+        sb.sleep(0.5)
+
+                # ── Submit Login ───────────────────────────────────────
+        print("   Submitting login...")
+        submitted = False
+
+        # Method 1: Press Enter on password field
+        try:
+            for sel in ["input[placeholder='Password']",
+                        "input[name='password']",
+                        "input[type='password']"]:
+
+                try:
+                    sb.cdp.click(sel)
+                    sb.sleep(0.2)
+                    sb.cdp.press_keys(sel, "\n")
+                    submitted = True
+                    print("   ✅ Submitted via Enter key")
+                    break
+                except Exception:
+                    continue
         except Exception:
             pass
 
-        # Also check inside iframes
+        # Method 2: Click Sign In button
+        if not submitted:
+            try:
+                for btn in [
+                    "button[type='submit']",
+                    "button:contains('Sign In')",
+                    "input[type='submit']"
+                ]:
+                    try:
+                        sb.cdp.gui_click_element(btn)
+                        submitted = True
+                        print(f"   ✅ Clicked Sign In button using: {btn}")
+                        break
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"   ⚠️ Submit failed: {e}")
+
+        print("   ⏳ Waiting for login to complete...")
+
+        sb.sleep(6)
+
+        # ── Verify login ──────────────────────────────────────────
         try:
-            token = sb.cdp.evaluate("""
-                (function() {
-                    var iframes = document.querySelectorAll('iframe');
-                    for (var i = 0; i < iframes.length; i++) {
-                        try {
-                            var doc = iframes[i].contentDocument || iframes[i].contentWindow.document;
-                            var el = doc.getElementById('g-recaptcha-response');
-                            if (el && el.value && el.value.length > 50) return el.value;
-                        } catch(e) {}
-                    }
-                    return '';
-                })()
-            """)
-            if token and len(token) > 50:
-                captcha_token = token
-                print(f"   ✅ CAPTCHA token found in iframe! (length: {len(token)})")
-                break
+            url  = sb.cdp.get_current_url()
+            body = sb.cdp.get_text("body")
+            print(f"   📍 URL after submit: {url}")
+
+            # If still showing login form, login failed
+            if "User ID" in body and "Password" in body and "Sign In" in body[:500]:
+                print("   ❌ Still on login page — credentials may be wrong")
+                print("      Check SITE_USERNAME and PASSWORD_B64 in .env")
+                return {}
+            else:
+                print("   ✅ Login successful!")
         except Exception:
             pass
 
-        time.sleep(1)
+                # ── Navigate to search page after login ───────────────
+        print("   🌐 Opening search page...")
 
-    if not captcha_token:
-        print("   ⚠️  CAPTCHA token not found — trying gui_click_captcha as fallback")
-        try:
-            sb.cdp.gui_click_captcha()
-            sb.sleep(5)
-            # Try one more time to get token
-            token = sb.cdp.evaluate(
-                "document.getElementById('g-recaptcha-response') ? "
-                "document.getElementById('g-recaptcha-response').value : ''"
-            )
-            if token and len(token) > 50:
-                captcha_token = token
-                print(f"   ✅ Token obtained after gui click! (length: {len(token)})")
-        except Exception as e:
-            print(f"   ⚠️  gui_click_captcha error: {e}")
-
-    if not captcha_token:
-        print("   ❌ Could not obtain CAPTCHA token — skipping this report")
-        # Reload page for next attempt
         sb.cdp.open(SEARCH_PAGE_URL)
-        sb.sleep(3)
-        return None
+        sb.sleep(5)
 
-    # ── Click Search button ───────────────────────────────────────
-    print("   🔘 Clicking Search button...")
-    search_selectors = [
-        "button[type='submit']",
-        "button.search-button",
-        "button.btn-primary",
-        "input[type='submit']",
-        "button:contains('Search')",
-    ]
+        current_url = sb.cdp.get_current_url()
+        print(f"   📍 Current URL: {current_url}")
 
-    for selector in search_selectors:
+        # Verify we actually reached search page
+        if "search" not in current_url.lower():
+            print("   ❌ Login failed or redirected back to home page")
+            print("      Browser did not reach search page")
+
+            try:
+                body = sb.cdp.get_text("body")[:1000]
+                print(body)
+            except Exception:
+                pass
+
+            return {}
+
+        print("   ✅ Search page loaded successfully")
+
+        # ── Extract cookies and user agent ────────────────────────
+        cookie_dict = _extract_cookies_from_browser(sb)
         try:
-            sb.cdp.click(selector)
-            print(f"   ✅ Clicked Search via: {selector}")
-            break
+            user_agent = sb.cdp.get_user_agent()
         except Exception:
-            continue
+            pass
 
-    sb.sleep(3)
+    # Save cookies for reuse
+    if cookie_dict:
+        save_cookies({"cookies": cookie_dict, "user_agent": user_agent})
 
-    # ── Call Search API with captcha token ────────────────────────
-    print("   📡 Calling search API...")
+    return cookie_dict
 
-    # Refresh cookies before API call
-    try:
-        browser_cookies = sb.cdp.get_all_cookies()
-        for cookie in browser_cookies:
-            api_session.cookies.set(
-                cookie.get("name", ""),
-                cookie.get("value", ""),
-                domain="buycrash.lexisnexisrisk.com",
-            )
-    except Exception:
-        pass
 
+# -------------------------------------------------------------------
+# GET VALID API SESSION (login or reuse saved cookies)
+# -------------------------------------------------------------------
+
+def get_valid_session() -> requests.Session:
+    """
+    Returns a valid authenticated requests.Session.
+    Uses saved cookies if still valid, otherwise re-logs in.
+    """
+    # Try loading saved cookies first
+    saved = load_cookies()
+    if saved:
+        cookie_dict = saved.get("cookies", {})
+        user_agent  = saved.get("user_agent")
+        if cookie_dict:
+            api_session = _build_api_session_from_dict(cookie_dict, user_agent)
+            print("   🔄 Testing saved session...")
+            if _test_session(api_session):
+                return api_session
+            else:
+                print("   ⚠️  Saved session expired — need to re-login")
+                delete_cookies()
+
+    # No valid saved session — do fresh login
+    print("\n🔑 No valid session found — performing fresh login...")
+    cookie_dict = _login_via_browser()
+
+    if not cookie_dict:
+        raise Exception("Login failed — could not obtain session cookies")
+
+    saved = load_cookies()
+    ua = saved.get("user_agent") if saved else None
+    return _build_api_session_from_dict(cookie_dict, ua)
+
+
+# -------------------------------------------------------------------
+# CAPTCHA SOLVING via 2Captcha
+# -------------------------------------------------------------------
+
+def solve_recaptcha_v2(page_url: str) -> str:
+    """Submit reCAPTCHA v2 to 2Captcha and return the token."""
+
+    if not CAPTCHA_API_KEY:
+        raise Exception(
+            "CAPTCHA_API_KEY not set in .env — "
+            "sign up at 2captcha.com and add your key"
+        )
+
+    print("   🤖 Submitting CAPTCHA to 2Captcha...")
+
+    resp = requests.post("http://2captcha.com/in.php", data={
+        "key":       CAPTCHA_API_KEY,
+        "method":    "userrecaptcha",
+        "googlekey": CAPTCHA_SITE_KEY,
+        "pageurl":   page_url,
+        "json":      1,
+    }, timeout=30)
+
+    result = resp.json()
+    if result.get("status") != 1:
+        raise Exception(f"2Captcha submit failed: {result}")
+
+    task_id = result["request"]
+    print(f"   ⏳ Task {task_id} submitted — waiting for solution...")
+
+    for attempt in range(24):   # max 2 minutes
+        time.sleep(5)
+        poll = requests.get("http://2captcha.com/res.php", params={
+            "key":    CAPTCHA_API_KEY,
+            "action": "get",
+            "id":     task_id,
+            "json":   1,
+        }, timeout=30)
+
+        r = poll.json()
+        if r.get("status") == 1:
+            token = r["request"]
+            print(f"   ✅ CAPTCHA solved! Token length: {len(token)}")
+            return token
+        elif r.get("request") == "CAPCHA_NOT_READY":
+            print(f"   ⏳ ({attempt+1}/24) not ready yet...")
+        else:
+            raise Exception(f"2Captcha error: {r}")
+
+    raise Exception("2Captcha timeout after 2 minutes")
+
+
+# -------------------------------------------------------------------
+# SEARCH via API
+# -------------------------------------------------------------------
+
+def _search_via_api(api_session: requests.Session,
+                    report_number: str,
+                    captcha_token: str):
+    """Call search API and return record dict or None."""
     payload = {
         "fields": {
-            "state": STATE,
-            "jurisdiction": JURISDICTION,
-            "firstName": "",
-            "lastName": "",
-            "dateOfLoss": "",
-            "accidentLocation1": "",
-            "accidentLocation2": "",
-            "reportNumber": report_number,
+            "state":            STATE,
+            "jurisdiction":     JURISDICTION,
+            "firstName":        "",
+            "lastName":         "",
+            "dateOfLoss":       "",
+            "accidentLocation1":"",
+            "accidentLocation2":"",
+            "reportNumber":     report_number,
         },
         "captchaToken": captcha_token,
         "page": 1,
     }
 
-    try:
-        resp = api_session.post(SEARCH_API_URL, json=payload, timeout=30)
+    resp = api_session.post(SEARCH_API_URL, json=payload, timeout=30)
 
-        if resp.status_code == 200:
-            data = resp.json()
-            records = data.get("data", {}).get("records", [])
-
-            if records and len(records) > 0 and len(records[0]) > 0:
-                record = records[0][0]
-                record["reportTypeLabel"] = get_report_type_label(
-                    record.get("reportType", "U")
-                )
-                print(f"   🎉 Report FOUND: {record.get('reportNumber')}")
-                return record
-            else:
-                print(f"   ℹ️  No records found for report {report_number}")
-                # Reload for next search
-                sb.cdp.open(SEARCH_PAGE_URL)
-                sb.sleep(3)
-                return None
-        else:
-            print(f"   ⚠️  API returned HTTP {resp.status_code}: {resp.text[:200]}")
-            sb.cdp.open(SEARCH_PAGE_URL)
-            sb.sleep(3)
-            return None
-
-    except Exception as e:
-        print(f"   ❌ API call error: {e}")
-        sb.cdp.open(SEARCH_PAGE_URL)
-        sb.sleep(3)
+    if resp.status_code == 200:
+        data    = resp.json()
+        records = data.get("data", {}).get("records", [])
+        if records and len(records[0]) > 0:
+            record = records[0][0]
+            record["reportTypeLabel"] = get_report_type_label(
+                record.get("reportType", "U")
+            )
+            return record
         return None
+
+    elif resp.status_code in (401, 403):
+        raise Exception("SESSION_EXPIRED")
+    else:
+        print(f"   ⚠️  API HTTP {resp.status_code}: {resp.text[:150]}")
+        return None
+
+
+# -------------------------------------------------------------------
+# MAIN ENTRY POINT
+# -------------------------------------------------------------------
+
+def run_search_session(report_numbers: list,
+                       found_callback,
+                       not_found_callback) -> int:
+    """
+    Get/reuse valid session, then search each report number via API.
+    Login only happens when no valid session exists.
+    """
+    found_count = 0
+
+    # Get session — reuses saved cookies or logs in fresh
+    api_session = get_valid_session()
+
+    for report_num in report_numbers:
+        report_str = str(report_num)
+        print(f"\n🔍 Checking report: {report_str}")
+
+        try:
+            # Get fresh captcha token for this request
+            token = solve_recaptcha_v2(SEARCH_PAGE_URL)
+
+            result = _search_via_api(api_session, report_str, token)
+
+            if result is not None:
+                found_count += 1
+                found_callback(result)
+                print(f"   🎉 Found {found_count} valid report(s) so far")
+            else:
+                not_found_callback(report_str)
+
+        except Exception as e:
+            if "SESSION_EXPIRED" in str(e):
+                print("   ⚠️  Session expired — deleting cookies, will re-login next batch")
+                delete_cookies()
+                raise  # Let main.py restart the batch with fresh login
+            elif "CAPTCHA_API_KEY not set" in str(e):
+                print(f"\n❌ {e}")
+                raise
+            else:
+                print(f"   ⚠️  Error on {report_str}: {e}")
+                not_found_callback(report_str)
+
+        time.sleep(1)
+
+    return found_count
