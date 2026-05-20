@@ -20,37 +20,45 @@ import pickle
 import requests
 from seleniumbase import SB
 from config import (
-    USERNAME, get_password,
+    USERNAME, PASSWORD_B64,
     BASE_URL, SEARCH_PAGE_URL, SEARCH_API_URL,
     STATE, JURISDICTION,
     get_report_type_label,
     CAPTCHA_API_KEY, CAPTCHA_SITE_KEY,
 )
 
-COOKIES_FILE = "session_cookies.pkl"
+COOKIES_FILE = "session_cookies.pkl"  # default; overridden per account
+
+
+def _cookies_file(account_idx: int) -> str:
+    """Each account gets its own cookie file so sessions don't clash."""
+    return f"session_cookies_{account_idx + 1}.pkl"
 
 
 # -------------------------------------------------------------------
 # COOKIE PERSISTENCE
 # -------------------------------------------------------------------
 
-def save_cookies(data: dict):
-    with open(COOKIES_FILE, "wb") as f:
+def save_cookies(data: dict, account_idx: int = 0):
+    path = _cookies_file(account_idx)
+    with open(path, "wb") as f:
         pickle.dump(data, f)
-    print(f"   Session cookies saved to {COOKIES_FILE}")
+    print(f"   Session cookies saved to {path}")
 
 
-def load_cookies() -> dict:
-    if os.path.exists(COOKIES_FILE):
-        with open(COOKIES_FILE, "rb") as f:
+def load_cookies(account_idx: int = 0) -> dict:
+    path = _cookies_file(account_idx)
+    if os.path.exists(path):
+        with open(path, "rb") as f:
             return pickle.load(f)
     return {}
 
 
-def delete_cookies():
-    if os.path.exists(COOKIES_FILE):
-        os.remove(COOKIES_FILE)
-        print("   Deleted saved cookies (will re-login next run)")
+def delete_cookies(account_idx: int = 0):
+    path = _cookies_file(account_idx)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"   Deleted saved cookies for account {account_idx + 1}")
 
 
 # -------------------------------------------------------------------
@@ -198,9 +206,9 @@ def _handle_otp(sb):
     print("")
 
     otp_code = None
-    max_wait  = 288   # 4 minutes
+    max_wait  = 3600   # 1 hour
     elapsed   = 0
-    interval  = 12
+    interval  = 30
 
     while elapsed < max_wait:
         sb.sleep(interval)
@@ -217,7 +225,7 @@ def _handle_otp(sb):
             print(f"   Sheet poll error: {e}")
 
     if not otp_code:
-        raise Exception("OTP timeout: no code found in Google Sheet cell B2 after 4 minutes")
+        raise Exception("OTP timeout: no code found in Google Sheet cell B2 after 1 hour")
 
     # Step 4: Wait for Verify Authentication page
     print("   Waiting for Verify Authentication page...")
@@ -309,9 +317,9 @@ def _handle_otp(sb):
 # LOGIN VIA BROWSER — returns cookie dict
 # -------------------------------------------------------------------
 
-def _login_via_browser() -> dict:
+def _login_via_browser(username: str, password: str) -> dict:
     """
-    Opens browser, logs in, handles OTP if needed,
+    Opens browser, logs in with given credentials, handles OTP if needed,
     navigates to search page to confirm session, then extracts cookies.
     Returns cookie dict (empty dict on failure).
     """
@@ -319,7 +327,7 @@ def _login_via_browser() -> dict:
     user_agent  = None
 
     with SB(uc=True, test=False, locale="en", headless=False) as sb:
-        print("Opening browser for login...")
+        print(f"Opening browser for login (account: {username})...")
         sb.activate_cdp_mode(BASE_URL + "/ui/home")
         sb.sleep(4)
 
@@ -340,7 +348,7 @@ def _login_via_browser() -> dict:
         sb.sleep(2)
 
         # Fill User ID
-        print(f"   Filling User ID: {USERNAME}")
+        print(f"   Filling User ID: {username}")
         for sel in [
             "input[placeholder='User ID']",
             "input[name='username']",
@@ -349,7 +357,7 @@ def _login_via_browser() -> dict:
             try:
                 sb.cdp.click(sel)
                 sb.sleep(0.3)
-                sb.cdp.type(sel, USERNAME)
+                sb.cdp.type(sel, username)
                 print("   User ID filled")
                 break
             except Exception:
@@ -367,7 +375,7 @@ def _login_via_browser() -> dict:
             try:
                 sb.cdp.click(sel)
                 sb.sleep(0.3)
-                sb.cdp.type(sel, get_password())
+                sb.cdp.type(sel, password)
                 print("   Password filled")
                 break
             except Exception:
@@ -447,7 +455,9 @@ def _login_via_browser() -> dict:
             pass
 
     if cookie_dict:
-        save_cookies({"cookies": cookie_dict, "user_agent": user_agent})
+        # caller passes account_idx separately; save with default 0 here,
+        # get_valid_session() will handle the correct index
+        save_cookies({"cookies": cookie_dict, "user_agent": user_agent}, 0)
 
     return cookie_dict
 
@@ -456,32 +466,37 @@ def _login_via_browser() -> dict:
 # GET VALID API SESSION (reuse cookies or fresh login)
 # -------------------------------------------------------------------
 
-def get_valid_session() -> requests.Session:
+def get_valid_session(account: dict, account_idx: int = 0) -> requests.Session:
     """
-    Returns a valid authenticated requests.Session.
+    Returns a valid authenticated requests.Session for the given account.
     Reuses saved cookies if still valid, otherwise re-logs in.
+    account = {"username": "...", "password": "..."}
     """
-    saved = load_cookies()
+    username = account["username"]
+    password = account["password"]
+
+    saved = load_cookies(account_idx)
     if saved:
         cookie_dict = saved.get("cookies", {})
         user_agent  = saved.get("user_agent")
         if cookie_dict:
             api_session = _build_api_session(cookie_dict, user_agent)
-            print("   Testing saved session...")
+            print(f"   Testing saved session for account {account_idx + 1} ({username})...")
             if _test_session(api_session):
                 return api_session
             else:
-                print("   Saved session expired — need to re-login")
-                delete_cookies()
+                print(f"   Saved session for account {account_idx + 1} expired — re-logging in")
+                delete_cookies(account_idx)
 
-    print("\nNo valid session — performing fresh browser login...")
-    cookie_dict = _login_via_browser()
+    print(f"\nLogging in with account {account_idx + 1}: {username}")
+    cookie_dict = _login_via_browser(username, password)
 
     if not cookie_dict:
-        raise Exception("Login failed — could not obtain session cookies")
+        raise Exception(f"Login failed for account {account_idx + 1} ({username})")
 
-    saved      = load_cookies()
-    ua         = saved.get("user_agent") if saved else None
+    save_cookies({"cookies": cookie_dict, "user_agent": None}, account_idx)
+    saved = load_cookies(account_idx)
+    ua    = saved.get("user_agent") if saved else None
     return _build_api_session(cookie_dict, ua)
 
 
@@ -584,19 +599,22 @@ def _search_via_api(api_session: requests.Session,
         data = resp.json()
         code = data.get("code", "")
 
+        if code == "SEARCH_LIMIT_REACHED":
+            print("   [LIMIT] Site search limit reached for this session.")
+            print("   [LIMIT] This is the site's own rate cap — not a 2Captcha issue.")
+            raise Exception("SEARCH_LIMIT_REACHED")
+
         if code == "VALIDATION_ERROR":
             msgs = data.get("validationMessages", [])
             print(f"   [DEBUG] Validation errors: {msgs}")
-            # Check specifically for captcha error
             for m in msgs:
                 if m.get("fieldName") == "captchaToken":
                     print("   [DEBUG] CAPTCHA TOKEN REJECTED by server")
                     print("          Possible reasons:")
                     print("          1. Token expired (>2 min between solve and use)")
-                    print("          2. Wrong captcha type (site may use Enterprise)")
-                    print("          3. XSRF-TOKEN mismatch")
-                    print("          4. Site key changed")
-            return None  # Treat as not found, but log it
+                    print("          2. XSRF-TOKEN mismatch")
+                    print("          3. Site key changed")
+            return None
 
         if code == "OK":
             records = data.get("data", {}).get("records", [])
@@ -631,17 +649,30 @@ def run_search_session(report_numbers: list,
                        found_callback,
                        not_found_callback,
                        found_so_far: int = 0,
-                       target: int = 3) -> int:
+                       target: int = 100,
+                       account: dict = None,
+                       account_idx: int = 0,
+                       on_limit_hit=None) -> int:
     """
-    Get/reuse a valid API session, then search each report number.
+    Get/reuse a valid API session for the given account, then search.
     found_so_far : count of found reports BEFORE this batch.
     target       : stop when found_so_far + found_count >= target.
+    account      : {"username": ..., "password": ...} — which account to use.
+    account_idx  : index of the account (for cookie file naming).
+    on_limit_hit : optional callable() — called when SEARCH_LIMIT_REACHED
+                   so main.py can rotate to the next account immediately.
     Returns count of found reports in THIS batch.
     """
+    from config import ACCOUNTS
+    if account is None:
+        account = ACCOUNTS[0] if ACCOUNTS else {"username": USERNAME, "password": PASSWORD_B64}
+
     found_count = 0
 
+    print(f"\n[ACCOUNT] Using account {account_idx + 1}: {account['username']}")
+
     # Get session (reuse cookies or fresh browser login)
-    api_session = get_valid_session()
+    api_session = get_valid_session(account, account_idx)
 
     for report_num in report_numbers:
 
@@ -673,17 +704,35 @@ def run_search_session(report_numbers: list,
                 not_found_callback(report_str)
 
         except Exception as e:
-            if "SESSION_EXPIRED" in str(e):
-                print("   Session expired — deleting cookies, will re-login next batch")
-                delete_cookies()
-                raise   # Let main.py restart with fresh login
-            elif "CAPTCHA_API_KEY" in str(e):
+            err = str(e)
+            if "SEARCH_LIMIT_REACHED" in err:
+                print(f"\n   [LIMIT] Search limit hit on account {account_idx + 1}.")
+                if on_limit_hit:
+                    # Signal main.py to rotate account
+                    on_limit_hit()
+                    # Stop this batch — main.py will restart with next account
+                    break
+                else:
+                    # No rotation callback: wait and retry
+                    wait_min = 5
+                    print(f"   [LIMIT] Pausing {wait_min} min before retrying...")
+                    for remaining in range(wait_min * 60, 0, -15):
+                        print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
+                        time.sleep(15)
+                    print("\n   [LIMIT] Retrying same report...")
+                    continue
+            elif "SESSION_EXPIRED" in err:
+                print(f"   Session expired for account {account_idx + 1} — deleting cookies")
+                delete_cookies(account_idx)
+                raise
+            elif "CAPTCHA_API_KEY" in err:
                 print(f"\nFATAL: {e}")
                 raise
             else:
                 print(f"   Error on {report_str}: {e}")
                 not_found_callback(report_str)
 
-        time.sleep(1)
+        # Delay between searches to avoid hitting the rate limit too fast
+        time.sleep(8)
 
     return found_count
