@@ -117,17 +117,45 @@ def _do_login(sb):
     sb.sleep(0.3)
 
     # Submit
-    for strategy in [
-        lambda: sb.cdp.gui_click_element("button[type='submit']"),
-        lambda: sb.cdp.evaluate("document.querySelector('button[type=\"submit\"]').click()"),
-        lambda: sb.cdp.gui_press_key("Return"),
+    submitted = False
+
+    # First try pressing Enter on password field
+    for sel in [
+        "input[placeholder='Password']",
+        "input[name='password']",
+        "input[type='password']"
     ]:
         try:
-            strategy()
-            print("   ✅ Submitted login")
+            sb.cdp.click(sel)
+            sb.sleep(0.2)
+            sb.cdp.press_keys(sel, "\n")
+            print("   ✅ Pressed Enter to submit login")
+            submitted = True
             break
         except Exception:
             continue
+
+    # Fallback: click Sign In button
+    if not submitted:
+        for strategy in [
+            lambda: sb.cdp.find_element_by_text("Sign In").click(),
+            lambda: sb.cdp.gui_click_element("button[type='submit']"),
+            lambda: sb.cdp.click("button[type='submit']"),
+            lambda: sb.cdp.evaluate("""
+                (() => {
+                    const btn =
+                        [...document.querySelectorAll('button')]
+                        .find(b => b.innerText.includes('Sign In'));
+                    if (btn) btn.click();
+                })()
+            """),
+        ]:
+            try:
+                strategy()
+                print("   ✅ Submitted login")
+                break
+            except Exception:
+                continue
 
     sb.sleep(6)
 
