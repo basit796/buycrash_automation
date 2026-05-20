@@ -156,31 +156,79 @@ def _handle_otp(sb):
     else:
         raise Exception("OTP timeout: no code found in Google Sheet cell B2 after 4 minutes")
 
-    # ── Step 5: Fill Passcode field and submit ────────────────────
+    # ── Step 5: Wait for Verify Authentication page ─────────────
+    print("   Waiting for Verify Authentication page...")
+    for i in range(15):
+        sb.sleep(1)
+        try:
+            body_text = sb.cdp.get_text("body")
+            if "Verify Authentication" in body_text or "Passcode" in body_text:
+                print("   Verify Authentication page loaded")
+                break
+        except Exception:
+            pass
+    else:
+        print("   WARNING: Verify Authentication page may not have loaded, trying anyway...")
+
     sb.sleep(1)
     print(f"   Entering OTP: {otp_code}")
 
+    # Fill Passcode — Method 1: named selectors
     filled = False
     for sel in [
         "input[name*='passcode']",
+        "input[id*='passcode']",
+        "input[name*='Passcode']",
+        "input[id*='Passcode']",
         "input[name*='otp']",
         "input[name*='code']",
         "input[placeholder*='asscode']",
-        "input[placeholder*='ode']",
-        "input[type='text']",
-        "input[type='tel']",
-        "input[type='number']",
     ]:
         try:
             sb.cdp.click(sel)
-            sb.sleep(0.3)
+            sb.sleep(0.2)
             sb.cdp.evaluate(f"document.querySelector('{sel}').value = ''")
             sb.cdp.type(sel, otp_code)
-            print(f"   OTP filled via: {sel}")
+            print(f"   OTP filled via selector: {sel}")
             filled = True
             break
         except Exception:
             continue
+
+    # Fill Passcode — Method 2: JS fills first visible text input on page
+    if not filled:
+        try:
+            sb.cdp.evaluate(f"""
+                (function() {{
+                    var inputs = document.querySelectorAll(
+                        'input[type="text"], input[type="password"], input:not([type])'
+                    );
+                    for (var i = 0; i < inputs.length; i++) {{
+                        if (inputs[i].offsetParent !== null) {{
+                            inputs[i].focus();
+                            inputs[i].value = '{otp_code}';
+                            inputs[i].dispatchEvent(new Event('input', {{bubbles:true}}));
+                            inputs[i].dispatchEvent(new Event('change', {{bubbles:true}}));
+                            break;
+                        }}
+                    }}
+                }})();
+            """)
+            print("   OTP filled via JS (first visible input)")
+            filled = True
+        except Exception as e:
+            print(f"   JS fill failed: {e}")
+
+    # Fill Passcode — Method 3: broadest fallback
+    if not filled:
+        try:
+            sb.cdp.click("input")
+            sb.sleep(0.2)
+            sb.cdp.type("input", otp_code)
+            print("   OTP filled via generic input selector")
+            filled = True
+        except Exception as e:
+            print(f"   Generic fill failed: {e}")
 
     if not filled:
         print("   WARNING: Could not find Passcode field — OTP not entered")
@@ -188,23 +236,8 @@ def _handle_otp(sb):
 
     sb.sleep(0.5)
 
-    # Submit — try Tab+Enter first, then button click
+    # Submit — click Submit button
     submitted = False
-    for sel in [
-        "input[name*='passcode']",
-        "input[name*='otp']",
-        "input[type='text']",
-    ]:
-        try:
-            sb.cdp.press_keys(sel, "\t")
-            sb.sleep(0.2)
-            sb.cdp.press_keys(sel, "\n")
-            print("   OTP submitted via Tab + Enter")
-            submitted = True
-            break
-        except Exception:
-            continue
-
     if not submitted:
         for btn_sel in [
             "button:contains('Submit')",
@@ -477,68 +510,50 @@ def _search_one_report(sb, report_number: str) -> dict:
         except Exception:
             continue
 
-    sb.sleep(3)
+    sb.sleep(30)
 
-    # ── Check result ──────────────────────────────────────────────
+    # -- Check result ------------------------------------------------
     current_url = sb.cdp.get_current_url()
-    print(f"   📍 URL after search: {current_url}")
+    print(f"   URL after search: {current_url}")
 
-    # Check 1: Did URL change to a results/detail page?
-    if "result" in current_url or "detail" in current_url or "report" in current_url.split("search")[1] if "search" in current_url else False:
-        print("   🎉 URL changed — report likely found!")
-        # Extract data from page
-        return _extract_from_page(sb, report_number)
-
-    # Check 2: Look for result elements on page
     try:
         page_text = sb.cdp.get_text("body")
-
-        # Signs of NO result
-        no_result_phrases = [
-            "no results",
-            "no records found",
-            "0 results",
-            "not found",
-            "no reports found",
-        ]
-        for phrase in no_result_phrases:
-            if phrase.lower() in page_text.lower():
-                print(f"   ❌ No results found (detected: '{phrase}')")
-                return None
-
-        # Signs of a RESULT
-        result_phrases = [
-            "date of incident",
-            "report number",
-            "accident location",
-            "dateofincident",
-        ]
-        for phrase in result_phrases:
-            if phrase.lower() in page_text.lower():
-                print("   🎉 Result data detected on page!")
-                return _extract_from_page(sb, report_number)
-
     except Exception as e:
-        print(f"   ⚠️  Page text check error: {e}")
+        print(f"   Could not read page text: {e}")
+        return None
 
-    # Check 3: Look for result table/card elements
-    result_selectors = [
-        ".search-result",
-        ".result-card",
-        ".report-result",
-        "table.results",
-        "[class*='result']",
-        "[class*='record']",
-    ]
-    for sel in result_selectors:
-        try:
-            if sb.cdp.is_element_visible(sel):
-                print(f"   🎉 Result element found: {sel}")
-                return _extract_from_page(sb, report_number)
-        except Exception:
-            continue
+    page_lower = page_text.lower()
 
-    print(f"   ❌ No report found for {report_number}")
+    # PRIMARY: "N records found" - the most reliable signal on this site
+    import re as _re2
+    count_match = _re2.search(r'(\d+)\s+records?\s+found', page_lower)
+    if count_match:
+        count = int(count_match.group(1))
+        if count == 0:
+            print(f"   NOT FOUND - 0 records found")
+            return None
+        else:
+            print(f"   FOUND - {count} records found")
+            return _extract_from_page(sb, report_number)
+
+    # FALLBACK 1: explicit no-result phrases
+    for phrase in ["no results", "no records found", "0 results", "no reports found"]:
+        if phrase in page_lower:
+            print(f"   NOT FOUND (phrase: {phrase})")
+            return None
+
+    # FALLBACK 2: URL navigated to /results page
+    if "/results" in current_url or "/report/detail" in current_url:
+        print("   FOUND - URL changed to results page")
+        return _extract_from_page(sb, report_number)
+
+    # FALLBACK 3: Add to Cart button = result row exists
+    if "add to cart" in page_lower:
+        print("   FOUND - Add to Cart button detected")
+        return _extract_from_page(sb, report_number)
+
+    print(f"   NOT FOUND - no result signals for {report_number}")
+    return None
     return None
 
 
@@ -551,10 +566,12 @@ def _extract_from_page(sb, report_number: str) -> dict:
     Extract report details from the result page.
     Returns a dict with the data we need.
     """
+    import re, json as _json
+
     record = {
         "reportNumber":    report_number,
-        "reportType":      "",
-        "reportTypeLabel": "",
+        "reportType":      "A",
+        "reportTypeLabel": "Accident Report",
         "dateOfIncident":  "",
         "street":          "",
         "crossStreet":     "",
@@ -562,40 +579,72 @@ def _extract_from_page(sb, report_number: str) -> dict:
         "jurisdiction":    "DETROIT POLICE DEPARTMENT",
     }
 
+    # ── Method 1: JavaScript table extraction ────────────────────
     try:
-        page_text = sb.cdp.get_text("body")
+        js_result = sb.cdp.evaluate("""
+            (function() {
+                var result = {reportType:'', lastNames:'', doi:'', location:''};
+                var trs = Array.from(document.querySelectorAll('tr'));
+                for (var i = 0; i < trs.length; i++) {
+                    var tds = Array.from(trs[i].querySelectorAll('td'));
+                    if (tds.length < 3) continue;
+                    var rowTxt = trs[i].innerText || '';
+                    if (!/\\d{2}\\/\\d{2}\\/\\d{4}/.test(rowTxt)) continue;
+                    // data row found
+                    result.reportType = tds[0].innerText.replace(/Add to Cart/gi,'').trim();
+                    result.lastNames  = tds[1] ? tds[1].innerText.trim() : '';
+                    result.doi        = tds[2] ? tds[2].innerText.trim() : '';
+                    result.location   = tds[3] ? tds[3].innerText.trim() : '';
+                    break;
+                }
+                return JSON.stringify(result);
+            })()
+        """)
 
-        # Try to get structured data from page
-        # Look for common field patterns
-        import re
+        if js_result and js_result != 'null':
+            d = _json.loads(js_result)
 
-        # Date pattern
-        date_match = re.search(
-            r'(\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})',
-            page_text
-        )
-        if date_match:
-            record["dateOfIncident"] = date_match.group(1)
+            rt = d.get('reportType', '')
+            if rt:
+                record['reportTypeLabel'] = rt
+                record['reportType'] = 'F' if 'Fatal' in rt else 'A'
 
-        # Try to get page source for more detail
-        html = sb.cdp.get_html()
+            doi = re.search(r'\d{2}/\d{2}/\d{4}', d.get('doi', ''))
+            if doi:
+                record['dateOfIncident'] = doi.group(0)
 
-        # Look for report type
-        if "Accident" in page_text:
-            record["reportType"]      = "A"
-            record["reportTypeLabel"] = "Accident Report"
-        elif "Fatal" in page_text:
-            record["reportType"]      = "F"
-            record["reportTypeLabel"] = "Fatal Accident Report"
-        else:
-            record["reportType"]      = "A"
-            record["reportTypeLabel"] = "Accident Report"
+            raw_names = d.get('lastNames', '')
+            if raw_names:
+                record['lastNames'] = [n.strip() for n in re.split(r'[;,]', raw_names) if n.strip()]
 
-        print(f"   📄 Extracted: date={record['dateOfIncident']}, "
-              f"type={record['reportTypeLabel']}")
+            loc_lines = [l.strip() for l in d.get('location', '').splitlines() if l.strip()]
+            if loc_lines:
+                parts = [p.strip() for p in loc_lines[0].split('/')]
+                record['street']      = parts[0] if parts else ''
+                record['crossStreet'] = parts[1] if len(parts) > 1 else ''
+            if len(loc_lines) > 1:
+                record['jurisdiction'] = loc_lines[-1]
+
+            print(f"   Extracted: date={record['dateOfIncident']}, "
+                  f"type={record['reportTypeLabel']}, "
+                  f"names={record['lastNames']}")
 
     except Exception as e:
-        print(f"   ⚠️  Extraction error: {e}")
+        print(f"   JS extraction error: {e}")
+
+    # ── Method 2: Regex fallback on page text ────────────────────
+    if not record['dateOfIncident']:
+        try:
+            page_text = sb.cdp.get_text("body")
+            m = re.search(r'(\d{2}/\d{2}/\d{4})', page_text)
+            if m:
+                record['dateOfIncident'] = m.group(1)
+            if 'Fatal' in page_text:
+                record['reportType'] = 'F'
+                record['reportTypeLabel'] = 'Fatal Accident Report'
+            print(f"   Regex fallback: date={record['dateOfIncident']}")
+        except Exception as e:
+            print(f"   Regex extraction error: {e}")
 
     return record
 
