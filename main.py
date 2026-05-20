@@ -104,6 +104,8 @@ def main():
                 report_numbers    = batch,
                 found_callback    = on_found,
                 not_found_callback= on_not_found,
+                found_so_far      = found_total,
+                target            = TARGET_FOUND,
             )
             found_total += found_in_batch
 

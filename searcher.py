@@ -47,8 +47,8 @@ def solve_recaptcha(page_url: str) -> str:
     task_id = r["request"]
     print(f"   ⏳ Task {task_id} — waiting for solution (15-30s)...")
 
-    for attempt in range(24):  # max 2 minutes
-        time.sleep(5)
+    for attempt in range(24):  # max 4 minutes
+        time.sleep(12)
         poll = requests.get("http://2captcha.com/res.php", params={
             "key":    CAPTCHA_API_KEY,
             "action": "get",
@@ -62,11 +62,179 @@ def solve_recaptcha(page_url: str) -> str:
             print(f"   ✅ CAPTCHA token received (length: {len(token)})")
             return token
         elif r.get("request") == "CAPCHA_NOT_READY":
-            print(f"   ⏳ Not ready... ({(attempt+1)*5}s)")
+            print(f"   ⏳ Not ready... ({(attempt+1)*12}s)")
         else:
             raise Exception(f"2Captcha poll error: {r}")
 
-    raise Exception("2Captcha timeout after 2 minutes")
+    raise Exception("2Captcha timeout after 4 minutes")
+
+
+# -------------------------------------------------------------------
+# OTP HANDLER — reads code from Google Sheet cell B2
+# -------------------------------------------------------------------
+
+def _handle_otp(sb):
+    """
+    Full OTP flow:
+    1. Make sure Email radio is selected
+    2. Click 'Send Code and Continue'
+    3. Instruct user to paste OTP into Google Sheet (Start Number tab, cell B2)
+    4. Poll that cell every 12s until a 6-digit code appears (4 min timeout)
+    5. Fill the Passcode field and submit
+    """
+    import sheets_handler
+
+    print("")
+    print("=" * 55)
+    print("  OTP REQUIRED — Unrecognized Location")
+    print("=" * 55)
+
+    # ── Step 1: Select Email radio button ────────────────────────
+    print("   Selecting Email as OTP channel...")
+    for sel in [
+        "input[type='radio'][value*='mail']",
+        "input[type='radio']:first-of-type",
+    ]:
+        try:
+            sb.cdp.click(sel)
+            print("   Email radio selected")
+            sb.sleep(0.5)
+            break
+        except Exception:
+            continue
+
+    # ── Step 2: Click 'Send Code and Continue' ────────────────────
+    print("   Clicking 'Send Code and Continue'...")
+    sent = False
+    for sel in [
+        "button:contains('Send Code')",
+        "button:contains('Send Code and Continue')",
+        "input[type='submit']",
+        "button[type='submit']",
+    ]:
+        try:
+            sb.cdp.click(sel)
+            print("   Clicked Send Code button")
+            sent = True
+            sb.sleep(2)
+            break
+        except Exception:
+            continue
+
+    if not sent:
+        # Fallback: Tab then Enter from radio
+        try:
+            sb.cdp.gui_press_key("Tab")
+            sb.sleep(0.3)
+            sb.cdp.gui_press_key("Return")
+            print("   Sent via Tab + Enter fallback")
+            sb.sleep(2)
+        except Exception as e:
+            print(f"   WARNING: Could not click Send Code: {e}")
+
+    # ── Step 3: Tell user to paste OTP into Google Sheet ─────────
+    print("")
+    print("-" * 55)
+    print("  ACTION REQUIRED:")
+    print("  An OTP has been sent to your email.")
+    print("  Open the Google Sheet -> 'Start Number' tab")
+    print("  Paste the OTP code into cell B2")
+    print("  (The script will read it automatically)")
+    print("-" * 55)
+    print("")
+
+    # ── Step 4: Poll Google Sheet B2 for the OTP ─────────────────
+    otp_code = None
+    max_attempts = 24   # 24 x 12s = 4 minutes
+    for attempt in range(max_attempts):
+        sb.sleep(12)
+        otp_code = sheets_handler.get_otp_from_sheet()
+        if otp_code:
+            print(f"   OTP received from Google Sheet: {otp_code}")
+            break
+        print(f"   Waiting for OTP in Sheet B2... ({(attempt+1)*12}s / {max_attempts*12}s)")
+    else:
+        raise Exception("OTP timeout: no code found in Google Sheet cell B2 after 4 minutes")
+
+    # ── Step 5: Fill Passcode field and submit ────────────────────
+    sb.sleep(1)
+    print(f"   Entering OTP: {otp_code}")
+
+    filled = False
+    for sel in [
+        "input[name*='passcode']",
+        "input[name*='otp']",
+        "input[name*='code']",
+        "input[placeholder*='asscode']",
+        "input[placeholder*='ode']",
+        "input[type='text']",
+        "input[type='tel']",
+        "input[type='number']",
+    ]:
+        try:
+            sb.cdp.click(sel)
+            sb.sleep(0.3)
+            sb.cdp.evaluate(f"document.querySelector('{sel}').value = ''")
+            sb.cdp.type(sel, otp_code)
+            print(f"   OTP filled via: {sel}")
+            filled = True
+            break
+        except Exception:
+            continue
+
+    if not filled:
+        print("   WARNING: Could not find Passcode field — OTP not entered")
+        return
+
+    sb.sleep(0.5)
+
+    # Submit — try Tab+Enter first, then button click
+    submitted = False
+    for sel in [
+        "input[name*='passcode']",
+        "input[name*='otp']",
+        "input[type='text']",
+    ]:
+        try:
+            sb.cdp.press_keys(sel, "\t")
+            sb.sleep(0.2)
+            sb.cdp.press_keys(sel, "\n")
+            print("   OTP submitted via Tab + Enter")
+            submitted = True
+            break
+        except Exception:
+            continue
+
+    if not submitted:
+        for btn_sel in [
+            "button:contains('Submit')",
+            "button:contains('Verify')",
+            "button:contains('Continue')",
+            "button[type='submit']",
+        ]:
+            try:
+                sb.cdp.click(btn_sel)
+                print(f"   OTP submitted via button: {btn_sel}")
+                submitted = True
+                break
+            except Exception:
+                continue
+
+    sb.sleep(5)
+
+    # Verify we left the OTP page
+    current = sb.cdp.get_current_url()
+    if "otp" in current.lower() or "verify" in current.lower():
+        print(f"   WARNING: May still be on OTP/verify page: {current}")
+    else:
+        print(f"   OTP complete! Redirected to: {current}")
+
+    # Clear B2 so stale code is not reused next time
+    try:
+        sheets_handler.clear_otp_from_sheet()
+        print("   Cleared OTP from Google Sheet B2")
+    except Exception:
+        pass
 
 
 # -------------------------------------------------------------------
@@ -161,27 +329,12 @@ def _do_login(sb):
 
     # Handle OTP if redirected
     url = sb.cdp.get_current_url()
-    print(f"   📍 After login URL: {url}")
+    print(f"   After login URL: {url}")
 
     if "otp" in url.lower():
-        print("\n" + "="*50)
-        print("  🔐 OTP REQUIRED!")
-        print("  📱 Check your email/phone for OTP code")
-        print("  ⌨️  Enter the OTP code in the browser window")
-        print("  ✋  Waiting up to 2 minutes...")
-        print("="*50 + "\n")
+        _handle_otp(sb)
 
-        for i in range(24):
-            sb.sleep(5)
-            current = sb.cdp.get_current_url()
-            if "otp" not in current.lower():
-                print(f"   ✅ OTP done! URL: {current}")
-                break
-            print(f"   ⏳ Waiting for OTP... ({(i+1)*5}s)")
-        else:
-            raise Exception("OTP timeout — took too long")
-
-    print("   ✅ Login complete!")
+    print("   Login complete!")
 
 
 # -------------------------------------------------------------------
@@ -453,10 +606,14 @@ def _extract_from_page(sb, report_number: str) -> dict:
 
 def run_search_session(report_numbers: list,
                        found_callback,
-                       not_found_callback) -> int:
+                       not_found_callback,
+                       found_so_far: int = 0,
+                       target: int = 3) -> int:
     """
     Single browser session — login once, search all report numbers.
-    Returns count of found reports.
+    found_so_far : global count of found reports BEFORE this batch.
+    target       : stop everything when found_so_far + found_count >= target.
+    Returns count of found reports in THIS batch.
     """
     found_count = 0
 
@@ -466,16 +623,22 @@ def run_search_session(report_numbers: list,
         _do_login(sb)
 
         # Go to search page
-        print(f"\n🌐 Going to search page...")
+        print("\nGoing to search page...")
         sb.cdp.open(SEARCH_PAGE_URL)
         sb.sleep(4)
-        print(f"   ✅ On search page")
+        print("   On search page")
 
         # Loop through report numbers
         for report_num in report_numbers:
+
+            # Global stop check — reached target before finishing batch
+            if found_so_far + found_count >= target:
+                print(f"\n*** TARGET REACHED ({target} found) — stopping batch early ***")
+                break
+
             report_str = str(report_num)
             print(f"\n{'='*50}")
-            print(f"🔍 Report: {report_str}")
+            print(f"Checking report: {report_str}")
             print(f"{'='*50}")
 
             try:
@@ -484,19 +647,24 @@ def run_search_session(report_numbers: list,
                 if record is not None:
                     found_count += 1
                     found_callback(record)
-                    print(f"   🎉 Total found so far: {found_count}")
+                    print(f"   Found in this batch: {found_count}  |  Global total: {found_so_far + found_count}/{target}")
+
+                    # Stop immediately if we've hit the global target
+                    if found_so_far + found_count >= target:
+                        print(f"\n*** GLOBAL TARGET {target} REACHED — stopping now ***")
+                        break
                 else:
                     not_found_callback(report_str)
 
             except KeyboardInterrupt:
-                print("\n⛔ Stopped by user")
+                print("\nStopped by user")
                 break
             except Exception as e:
-                print(f"   ⚠️  Error: {e}")
+                print(f"   Error on {report_str}: {e}")
                 not_found_callback(report_str)
 
-            # Go back to search page for next report
-            print(f"   🔄 Reloading search page for next report...")
+            # Reload search page for next report
+            print("   Reloading search page...")
             try:
                 sb.cdp.open(SEARCH_PAGE_URL)
                 sb.sleep(3)

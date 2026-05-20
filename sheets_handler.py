@@ -69,6 +69,37 @@ def get_start_number() -> int:
         return 0
 
 
+def get_otp_from_sheet() -> str:
+    """
+    Read the OTP code from the 'Start Number' sheet, cell B2.
+    The user pastes the OTP there after receiving it via email.
+    Returns the OTP string if it looks like a 4-8 digit code, else None.
+    """
+    try:
+        ws  = _get_spreadsheet().worksheet(SHEET_START)
+        val = ws.acell("B2").value
+        if val:
+            code = str(val).strip().replace(" ", "")
+            if code.isdigit() and 4 <= len(code) <= 8:
+                return code
+        return None
+    except Exception as e:
+        print(f"   [SHEETS] ERROR reading OTP from B2: {e}")
+        return None
+
+
+def clear_otp_from_sheet():
+    """
+    Clear cell B2 in 'Start Number' sheet after OTP is used.
+    Prevents stale codes from being reused on the next login.
+    """
+    try:
+        ws = _get_spreadsheet().worksheet(SHEET_START)
+        ws.update("B2", [[""]])
+    except Exception as e:
+        print(f"   [SHEETS] ERROR clearing OTP from B2: {e}")
+
+
 def save_found(report_number: str, date_of_incident: str):
     """
     Append a row to the 'Found' sheet:
