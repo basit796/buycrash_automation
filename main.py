@@ -4,28 +4,46 @@ main.py
 Orchestrator for BuyCrash report automation.
 
 Usage:
-    python main.py                  # Run from last saved progress
-    python main.py --reset          # Start fresh from START_REPORT in .env
-    python main.py --start 283746   # Start from a specific report number
+    python main.py                  # Run using start number from Google Sheet
+    python main.py --reset          # Reset local progress, still reads GSheet start
+    python main.py --start 283746   # Override start number from command line
+
+Data is saved to:
+  - Local Excel  (crash_reports.xlsx)
+  - Google Sheets (Found / Not Found tabs)
 """
-import sys
 import argparse
 import time
 from config import TARGET_FOUND, START_REPORT
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
 from searcher import run_search_session
+import sheets_handler
 
 
 # -------------------------------------------------------------------
-# Callbacks
+# Callbacks — dual-save to local Excel AND Google Sheets
 # -------------------------------------------------------------------
 
 def on_found(record: dict):
+    """Called for each successfully found report."""
+    # 1. Save to local Excel
     save_found_report(record)
 
+    # 2. Save to Google Sheets: Report Number + DOI only
+    sheets_handler.save_found(
+        report_number    = str(record.get("reportNumber", "")),
+        date_of_incident = str(record.get("dateOfIncident", "")),
+    )
+
+
 def on_not_found(report_number: str):
+    """Called for each report that was not found."""
+    # 1. Save to local Excel
     save_not_found_report(report_number)
+
+    # 2. Save to Google Sheets: Report Number + Date Searched
+    sheets_handler.save_not_found(report_number)
 
 
 # -------------------------------------------------------------------
@@ -34,24 +52,41 @@ def on_not_found(report_number: str):
 
 def main():
     parser = argparse.ArgumentParser(description="BuyCrash Report Automation")
-    parser.add_argument("--reset", action="store_true", help="Reset progress and start fresh")
-    parser.add_argument("--start", type=int, help="Start from a specific report number")
+    parser.add_argument("--reset", action="store_true", help="Reset local progress")
+    parser.add_argument("--start", type=int, help="Override start report number")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  BuyCrash Report Automation")
+    print("  BuyCrash Report Automation  (+ Google Sheets)")
     print("=" * 60)
+
+    # Test Google Sheets connection before we start
+    print("\n🔗 Checking Google Sheets connection...")
+    if not sheets_handler.test_connection():
+        print("⚠️  Google Sheets unavailable — results will be saved to local Excel only")
+    print()
 
     # Handle reset
     if args.reset:
         reset_progress()
 
-    # Determine starting report number
+    # ── Determine starting report number ────────────────────────────
     if args.start:
+        # Explicit override from CLI
         current_report = args.start
-        print(f"📌 Starting from specified report number: {current_report}")
+        print(f"📌 Starting from CLI argument: {current_report}")
+
     else:
-        current_report = load_progress()
+        # Priority 1: Google Sheet "Start Number" tab (cell A2)
+        gs_start = sheets_handler.get_start_number()
+
+        if gs_start and gs_start > 0:
+            current_report = gs_start
+            print(f"📋 Starting from Google Sheet 'Start Number': {current_report}")
+        else:
+            # Priority 2: Local progress file
+            current_report = load_progress()
+            print(f"📂 Starting from local progress file: {current_report}")
 
     found_total = 0
 
@@ -59,8 +94,6 @@ def main():
     print(f"🚀 Starting from report number: {current_report}\n")
 
     while found_total < TARGET_FOUND:
-        # Build a small batch of report numbers to check
-        # We process in batches of 10 to avoid very long browser sessions
         BATCH_SIZE = 10
         batch = list(range(current_report, current_report + BATCH_SIZE))
 
@@ -68,17 +101,17 @@ def main():
 
         try:
             found_in_batch = run_search_session(
-                report_numbers=batch,
-                found_callback=on_found,
-                not_found_callback=on_not_found,
+                report_numbers    = batch,
+                found_callback    = on_found,
+                not_found_callback= on_not_found,
             )
             found_total += found_in_batch
 
         except Exception as e:
             print(f"\n❌ Session error: {e}")
-            print("   Saving progress and will retry next batch...")
+            print("   Saving progress and retrying next batch...")
 
-        # Update progress to next batch
+        # Advance and save local progress
         current_report += BATCH_SIZE
         save_progress(current_report)
 
@@ -87,8 +120,6 @@ def main():
         if found_total >= TARGET_FOUND:
             break
 
-        # Short pause between batches
-        import time
         print("⏳ Waiting 5 seconds before next batch...")
         time.sleep(5)
 
@@ -96,7 +127,8 @@ def main():
     print("\n" + "=" * 60)
     print(f"✅ DONE! Found {found_total} valid reports.")
     get_summary()
-    print(f"\n📁 Results saved to: crash_reports.xlsx")
+    print(f"\n📁 Local results saved to : crash_reports.xlsx")
+    print(f"📊 Cloud results saved to : Google Sheets")
     print("=" * 60)
 
 
