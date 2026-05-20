@@ -14,7 +14,7 @@ def get_password():
 
 # --- 2Captcha ---
 CAPTCHA_API_KEY  = os.getenv("CAPTCHA_API_KEY", "")   # your 2captcha.com API key
-CAPTCHA_SITE_KEY = "6LfeIW0UAAAAADwGiNrFiXja2JQLLhcp5ciRj-jz"  # fixed — from the site
+CAPTCHA_SITE_KEY = "6LcguussAAAAAJSH4sc2q8R_DnOSO-5qUXfLWjoE"  # fixed — from the site
 
 # --- URLs ---
 BASE_URL        = "https://buycrash.lexisnexisrisk.com"
