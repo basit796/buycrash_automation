@@ -317,16 +317,17 @@ def _handle_otp(sb):
 # LOGIN VIA BROWSER — returns cookie dict
 # -------------------------------------------------------------------
 
-def _login_via_browser(username: str, password: str) -> dict:
+def _login_via_browser(username: str, password: str, account_idx: int = 0) -> dict:
     """
     Opens browser, logs in with given credentials, handles OTP if needed,
     navigates to search page to confirm session, then extracts cookies.
+    Saves cookies to the correct per-account file.
     Returns cookie dict (empty dict on failure).
     """
     cookie_dict = {}
     user_agent  = None
 
-    with SB(uc=True, test=False, locale="en", headless=False) as sb:
+    with SB(uc=True, test=False, locale="en", headless=True) as sb:
         print(f"Opening browser for login (account: {username})...")
         sb.activate_cdp_mode(BASE_URL + "/ui/home")
         sb.sleep(4)
@@ -455,9 +456,7 @@ def _login_via_browser(username: str, password: str) -> dict:
             pass
 
     if cookie_dict:
-        # caller passes account_idx separately; save with default 0 here,
-        # get_valid_session() will handle the correct index
-        save_cookies({"cookies": cookie_dict, "user_agent": user_agent}, 0)
+        save_cookies({"cookies": cookie_dict, "user_agent": user_agent}, account_idx)
 
     return cookie_dict
 
@@ -489,12 +488,11 @@ def get_valid_session(account: dict, account_idx: int = 0) -> requests.Session:
                 delete_cookies(account_idx)
 
     print(f"\nLogging in with account {account_idx + 1}: {username}")
-    cookie_dict = _login_via_browser(username, password)
+    cookie_dict = _login_via_browser(username, password, account_idx)
 
     if not cookie_dict:
         raise Exception(f"Login failed for account {account_idx + 1} ({username})")
 
-    save_cookies({"cookies": cookie_dict, "user_agent": None}, account_idx)
     saved = load_cookies(account_idx)
     ua    = saved.get("user_agent") if saved else None
     return _build_api_session(cookie_dict, ua)
@@ -641,9 +639,11 @@ def _search_via_api(api_session: requests.Session,
         return None
 
 
-# -------------------------------------------------------------------
-# MAIN ENTRY POINT
-# -------------------------------------------------------------------
+
+# Backoff schedule (seconds) per limit hit in a session.
+# Index 0 = baseline, index 1 = after 1st limit, 2 = 2nd, etc.
+_BACKOFF_STEPS = [8, 15, 30, 60]
+
 
 def run_search_session(report_numbers: list,
                        found_callback,
@@ -652,24 +652,31 @@ def run_search_session(report_numbers: list,
                        target: int = 100,
                        account: dict = None,
                        account_idx: int = 0,
-                       on_limit_hit=None) -> int:
+                       on_limit_hit=None,
+                       error_callback=None) -> int:
     """
     Get/reuse a valid API session for the given account, then search.
-    found_so_far : count of found reports BEFORE this batch.
-    target       : stop when found_so_far + found_count >= target.
-    account      : {"username": ..., "password": ...} — which account to use.
-    account_idx  : index of the account (for cookie file naming).
-    on_limit_hit : optional callable() — called when SEARCH_LIMIT_REACHED
-                   so main.py can rotate to the next account immediately.
+    found_so_far  : count of found reports BEFORE this batch.
+    target        : stop when found_so_far + found_count >= target.
+    account       : {"username": ..., "password": ...}
+    account_idx   : index of the account (for cookie file naming).
+    on_limit_hit  : callable() -- called when SEARCH_LIMIT_REACHED so main.py
+                    can rotate to the next account immediately.
+    error_callback: callable(report_number, error_msg) -- called after 3 failed
+                    retries instead of not_found_callback.
     Returns count of found reports in THIS batch.
     """
     from config import ACCOUNTS
     if account is None:
         account = ACCOUNTS[0] if ACCOUNTS else {"username": USERNAME, "password": PASSWORD_B64}
 
+    MAX_RETRIES = 3
     found_count = 0
+    limit_hits  = 0                         # rate limit hits this session
+    inter_delay = _BACKOFF_STEPS[0]         # starts at 8s, increases after each hit
 
     print(f"\n[ACCOUNT] Using account {account_idx + 1}: {account['username']}")
+    print(f"[DELAY]   Inter-search delay: {inter_delay}s (increases on rate limit)")
 
     # Get session (reuse cookies or fresh browser login)
     api_session = get_valid_session(account, account_idx)
@@ -678,7 +685,7 @@ def run_search_session(report_numbers: list,
 
         # Global stop check
         if found_so_far + found_count >= target:
-            print(f"\n*** TARGET REACHED ({target} found) — stopping batch early ***")
+            print(f"\n*** TARGET REACHED ({target} found) -- stopping batch early ***")
             break
 
         report_str = str(report_num)
@@ -686,53 +693,87 @@ def run_search_session(report_numbers: list,
         print(f"  Checking report: {report_str}")
         print(f"{'='*52}")
 
-        try:
-            token = solve_recaptcha(SEARCH_PAGE_URL)
+        last_error = None
+        success    = False
 
-            result = _search_via_api(api_session, report_str, token)
+        for attempt in range(1, MAX_RETRIES + 1):
+            if attempt > 1:
+                print(f"   [RETRY] Attempt {attempt}/{MAX_RETRIES} for report {report_str}...")
+                time.sleep(5)
 
-            if result is not None:
-                found_count += 1
-                found_callback(result)
-                print(f"   Found in this batch: {found_count}  |  "
-                      f"Global total: {found_so_far + found_count}/{target}")
+            try:
+                token  = solve_recaptcha(SEARCH_PAGE_URL)
+                result = _search_via_api(api_session, report_str, token)
 
-                if found_so_far + found_count >= target:
-                    print(f"\n*** GLOBAL TARGET {target} REACHED — stopping now ***")
-                    break
-            else:
-                not_found_callback(report_str)
+                if result is not None:
+                    found_count += 1
+                    found_callback(result)
+                    print(f"   Found in this batch: {found_count}  |  "
+                          f"Global total: {found_so_far + found_count}/{target}")
 
-        except Exception as e:
-            err = str(e)
-            if "SEARCH_LIMIT_REACHED" in err:
-                print(f"\n   [LIMIT] Search limit hit on account {account_idx + 1}.")
-                if on_limit_hit:
-                    # Signal main.py to rotate account
-                    on_limit_hit()
-                    # Stop this batch — main.py will restart with next account
-                    break
+                    if found_so_far + found_count >= target:
+                        print(f"\n*** GLOBAL TARGET {target} REACHED -- stopping now ***")
+                        return found_count
                 else:
-                    # No rotation callback: wait and retry
-                    wait_min = 5
-                    print(f"   [LIMIT] Pausing {wait_min} min before retrying...")
-                    for remaining in range(wait_min * 60, 0, -15):
-                        print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
-                        time.sleep(15)
-                    print("\n   [LIMIT] Retrying same report...")
-                    continue
-            elif "SESSION_EXPIRED" in err:
-                print(f"   Session expired for account {account_idx + 1} — deleting cookies")
-                delete_cookies(account_idx)
-                raise
-            elif "CAPTCHA_API_KEY" in err:
-                print(f"\nFATAL: {e}")
-                raise
+                    # Clean "not found" -- definitive, no retry needed
+                    not_found_callback(report_str)
+                    success = True
+                    break
+
+                success = True
+                break
+
+            except Exception as e:
+                err = str(e)
+                last_error = err
+
+                # Rate limit -- bump delay, rotate account
+                if "SEARCH_LIMIT_REACHED" in err:
+                    limit_hits += 1
+                    step        = min(limit_hits, len(_BACKOFF_STEPS) - 1)
+                    inter_delay = _BACKOFF_STEPS[step]
+                    print(f"\n   [LIMIT] Search limit hit on account {account_idx + 1}.")
+                    print(f"   [LIMIT] Total limit hits this session: {limit_hits}")
+                    print(f"   [BACKOFF] Delay escalated to: {inter_delay}s per search")
+                    if on_limit_hit:
+                        on_limit_hit()
+                        return found_count  # stop batch, main.py will rotate
+                    else:
+                        wait_min = 5
+                        print(f"   [LIMIT] Pausing {wait_min} min before retrying...")
+                        for remaining in range(wait_min * 60, 0, -15):
+                            print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
+                            time.sleep(15)
+                        print("\n   [LIMIT] Retrying same report...")
+                        continue
+
+                # Session expired -- must re-login, propagate up
+                if "SESSION_EXPIRED" in err:
+                    print(f"   Session expired for account {account_idx + 1} -- deleting cookies")
+                    delete_cookies(account_idx)
+                    raise
+
+                # Missing API key -- fatal
+                if "CAPTCHA_API_KEY" in err:
+                    print(f"\nFATAL: {e}")
+                    raise
+
+                # Generic retriable error
+                print(f"   [ERROR] Attempt {attempt}/{MAX_RETRIES} failed: {err[:120]}")
+                success = False
+
+        # After all retries exhausted
+        if not success:
+            print(f"   [ERROR] All {MAX_RETRIES} attempts failed for {report_str}")
+            print(f"   [ERROR] Last error: {last_error}")
+            if error_callback:
+                error_callback(report_str, last_error)
             else:
-                print(f"   Error on {report_str}: {e}")
                 not_found_callback(report_str)
 
-        # Delay between searches to avoid hitting the rate limit too fast
-        time.sleep(8)
+        # Dynamic inter-search delay (escalates after each rate-limit hit)
+        if inter_delay > _BACKOFF_STEPS[0]:
+            print(f"   [DELAY] Waiting {inter_delay}s (backoff active, {limit_hits} limit hits)...")
+        time.sleep(inter_delay)
 
     return found_count

@@ -8,20 +8,22 @@ Usage:
     python main.py --reset          # Reset local progress
     python main.py --start 283746   # Override start number
 
-Account rotation:
+Account rotation rules:
     - Rotates to the next account on every batch boundary
-    - Rotates immediately when SEARCH_LIMIT_REACHED
+    - Rotates immediately when SEARCH_LIMIT_REACHED is hit
+    - On limit hit: deletes that account's cookies (forces re-login next time)
+    - If ALL accounts hit the limit: waits 3 minutes, clears limit flags, retries
 
 Data is saved to:
   - Local Excel  (crash_reports.xlsx)
-  - Google Sheets (Found / Not Found tabs)
+  - Google Sheets (Found / Not Found / Errors tabs)
 """
 import argparse
 import time
 from config import TARGET_FOUND, START_REPORT, ACCOUNTS
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
-from searcher import run_search_session
+from searcher import run_search_session, delete_cookies
 import sheets_handler
 
 
@@ -30,7 +32,10 @@ import sheets_handler
 # -------------------------------------------------------------------
 
 def on_found(record: dict):
+    # 1. Local Excel — full data, our internal record
     save_found_report(record)
+
+    # 2. Google Sheets — client fields only: Report Number # + DOI
     sheets_handler.save_found(
         report_number    = str(record.get("reportNumber", "")),
         date_of_incident = str(record.get("dateOfIncident", "")),
@@ -40,6 +45,13 @@ def on_found(record: dict):
 def on_not_found(report_number: str):
     save_not_found_report(report_number)
     sheets_handler.save_not_found(report_number)
+
+
+def on_error(report_number: str, error_msg: str):
+    """Called after 3 retries all fail — saves to Errors sheet, NOT Not Found."""
+    print(f"   [ERROR FINAL] {report_number}: {error_msg[:80]}")
+    sheets_handler.save_error(report_number, error_msg)
+    save_not_found_report(f"ERROR:{report_number}")
 
 
 # -------------------------------------------------------------------
@@ -86,24 +98,41 @@ def main():
             current_report = load_progress()
             print(f"Starting from local progress file: {current_report}")
 
-    found_total = 0
-    account_idx = 0      # global ever-incrementing index (mod len gives actual slot)
-    limit_hit   = False  # flag set by on_limit_hit callback
+    found_total    = 0
+    account_idx    = 0                       # ever-incrementing, mod len gives real slot
+    limited_accs   = set()                   # tracks which account INDICES hit the limit
 
     print(f"\nTarget  : Find {TARGET_FOUND} valid reports")
     print(f"Starting: report number {current_report}")
-    print(f"Accounts: {len(ACCOUNTS)} available (rotate per batch + on rate limit)\n")
+    print(f"Accounts: {len(ACCOUNTS)} available\n")
 
     while found_total < TARGET_FOUND:
-        BATCH_SIZE   = 10
-        batch        = list(range(current_report, current_report + BATCH_SIZE))
-        real_idx     = account_idx % len(ACCOUNTS)
-        account      = ACCOUNTS[real_idx]
+        BATCH_SIZE = 10
+        real_idx   = account_idx % len(ACCOUNTS)
+        account    = ACCOUNTS[real_idx]
+
+        # ── If ALL accounts are rate-limited → pause 3 min then reset ──────
+        if len(limited_accs) >= len(ACCOUNTS):
+            print(f"\n[LIMIT-ALL] All {len(ACCOUNTS)} accounts have hit the rate limit.")
+            wait_sec = 3 * 60
+            print(f"[LIMIT-ALL] Waiting {wait_sec // 60} minutes before retrying...")
+            for remaining in range(wait_sec, 0, -15):
+                print(f"[LIMIT-ALL] Resuming in {remaining}s...", end="\r")
+                time.sleep(15)
+            print("\n[LIMIT-ALL] Wait done — clearing limit flags and retrying with account 1")
+            limited_accs.clear()
+            account_idx = 0          # restart rotation from account 1
+            real_idx    = 0
+            account     = ACCOUNTS[0]
+
+        batch = list(range(current_report, current_report + BATCH_SIZE))
 
         print(f"\n{'='*60}")
         print(f"  Batch  : {batch[0]} -> {batch[-1]}")
         print(f"  Account: {real_idx + 1} / {len(ACCOUNTS)}  ({account['username']})")
         print(f"  Found  : {found_total}/{TARGET_FOUND}")
+        if limited_accs:
+            print(f"  Limited: accounts {[i+1 for i in limited_accs]}")
         print(f"{'='*60}")
 
         limit_hit = False
@@ -122,15 +151,28 @@ def main():
                 account            = account,
                 account_idx        = real_idx,
                 on_limit_hit       = on_limit_hit,
+                error_callback     = on_error,
             )
             found_total += found_in_batch
+
+            # Successful batch — remove this account from limited set if it was there
+            if real_idx in limited_accs:
+                limited_accs.discard(real_idx)
+                print(f"[ROTATE] Account {real_idx+1} worked — removed from limited set")
 
         except Exception as e:
             print(f"\nSession error: {e}")
             print("Saving progress and continuing with next account...")
 
-        # If limit was hit mid-batch: DON'T advance report number
-        # so the same range is retried with the next account
+        # Handle limit hit
+        if limit_hit:
+            limited_accs.add(real_idx)
+            # Force re-login next time this account is used
+            delete_cookies(real_idx)
+            print(f"[LIMIT] Account {real_idx+1} ({account['username']}) cookies deleted"
+                  f" — will re-login fresh next time")
+
+        # Advance report number only if limit was NOT hit mid-batch
         if not limit_hit:
             current_report += BATCH_SIZE
 
@@ -140,10 +182,10 @@ def main():
         if found_total >= TARGET_FOUND:
             break
 
-        # Rotate account
+        # Rotate to next account
         next_real = (account_idx + 1) % len(ACCOUNTS)
         if limit_hit:
-            print(f"[ROTATE] Rate limit hit — switching "
+            print(f"[ROTATE] Rate limit — switching "
                   f"account {real_idx+1} -> {next_real+1} "
                   f"({ACCOUNTS[next_real]['username']}), retrying same batch")
         else:
