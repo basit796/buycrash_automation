@@ -11,19 +11,20 @@ Usage:
 Account rotation rules:
     - Rotates to the next account on every batch boundary
     - Rotates immediately when SEARCH_LIMIT_REACHED is hit
-    - On limit hit: deletes that account's cookies (forces re-login next time)
-    - If ALL accounts hit the limit: waits 3 minutes, clears limit flags, retries
+    - If ALL accounts hit the limit: dynamic pause schedule (no re-login forced)
+      Pause schedule (minutes): 3 → 6 → 15 → 30 → 60, repeats once, then terminates
 
 Data is saved to:
   - Local Excel  (crash_reports.xlsx)
   - Google Sheets (Found / Not Found / Errors tabs)
 """
 import argparse
+import sys
 import time
 from config import TARGET_FOUND, START_REPORT, ACCOUNTS
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
-from searcher import run_search_session, delete_cookies
+from searcher import run_search_session
 import sheets_handler
 
 
@@ -57,6 +58,12 @@ def on_error(report_number: str, error_msg: str):
 # -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
+
+# Pause schedule (minutes) when ALL accounts hit rate limit simultaneously.
+# Goes through this list twice; on the third cycle → terminates execution.
+_ALL_LIMIT_PAUSE_SCHEDULE = [3, 6, 15, 30, 60]
+_MAX_ALL_LIMIT_CYCLES     = 2   # after 2 full cycles → give up
+
 
 def main():
     parser = argparse.ArgumentParser(description="BuyCrash Report Automation")
@@ -98,32 +105,63 @@ def main():
             current_report = load_progress()
             print(f"Starting from local progress file: {current_report}")
 
-    found_total    = 0
-    account_idx    = 0                       # ever-incrementing, mod len gives real slot
-    limited_accs   = set()                   # tracks which account INDICES hit the limit
+    found_total      = 0
+    account_idx      = 0          # ever-incrementing; mod len gives real slot
+    limited_accs     = set()      # which account indices hit the limit this round
+
+    # All-limit pause tracking
+    all_limit_step   = 0          # position in _ALL_LIMIT_PAUSE_SCHEDULE
+    all_limit_cycle  = 0          # how many full cycles completed
 
     print(f"\nTarget  : Find {TARGET_FOUND} valid reports")
     print(f"Starting: report number {current_report}")
-    print(f"Accounts: {len(ACCOUNTS)} available\n")
+    print(f"Accounts: {len(ACCOUNTS)} available")
+    print(f"Pause schedule (all-limit): {_ALL_LIMIT_PAUSE_SCHEDULE} min × {_MAX_ALL_LIMIT_CYCLES} cycles\n")
 
     while found_total < TARGET_FOUND:
         BATCH_SIZE = 10
         real_idx   = account_idx % len(ACCOUNTS)
         account    = ACCOUNTS[real_idx]
 
-        # ── If ALL accounts are rate-limited → pause 3 min then reset ──────
+        # ── All accounts rate-limited → dynamic pause ──────────────────────
         if len(limited_accs) >= len(ACCOUNTS):
+
+            # Check if we've exhausted all cycles → terminate
+            if all_limit_cycle >= _MAX_ALL_LIMIT_CYCLES:
+                print(f"\n[LIMIT-ALL] All {len(ACCOUNTS)} accounts hit the limit "
+                      f"{_MAX_ALL_LIMIT_CYCLES} full pause cycles in a row.")
+                print("[LIMIT-ALL] Giving up — the site's rate cap appears permanent for today.")
+                print(f"[LIMIT-ALL] Progress saved at report {current_report}.")
+                print("[LIMIT-ALL] Re-run tomorrow or add more accounts.")
+                break
+
+            wait_min = _ALL_LIMIT_PAUSE_SCHEDULE[all_limit_step]
+            wait_sec = wait_min * 60
+
             print(f"\n[LIMIT-ALL] All {len(ACCOUNTS)} accounts have hit the rate limit.")
-            wait_sec = 3 * 60
-            print(f"[LIMIT-ALL] Waiting {wait_sec // 60} minutes before retrying...")
+            print(f"[LIMIT-ALL] Pause #{all_limit_step + 1} of cycle {all_limit_cycle + 1}"
+                  f"/{_MAX_ALL_LIMIT_CYCLES} — waiting {wait_min} min...")
+
             for remaining in range(wait_sec, 0, -15):
-                print(f"[LIMIT-ALL] Resuming in {remaining}s...", end="\r")
+                print(f"[LIMIT-ALL] Resuming in {remaining}s...  ", end="\r")
                 time.sleep(15)
-            print("\n[LIMIT-ALL] Wait done — clearing limit flags and retrying with account 1")
+            print()
+
+            # Advance through the schedule
+            all_limit_step += 1
+            if all_limit_step >= len(_ALL_LIMIT_PAUSE_SCHEDULE):
+                all_limit_step  = 0
+                all_limit_cycle += 1
+                if all_limit_cycle < _MAX_ALL_LIMIT_CYCLES:
+                    print(f"[LIMIT-ALL] Completed cycle {all_limit_cycle}/{_MAX_ALL_LIMIT_CYCLES}"
+                          f" — restarting pause schedule at 3 min")
+
+            # Clear limit flags and restart from account 1
             limited_accs.clear()
-            account_idx = 0          # restart rotation from account 1
+            account_idx = 0
             real_idx    = 0
             account     = ACCOUNTS[0]
+            print(f"[LIMIT-ALL] Retrying with account 1: {account['username']}\n")
 
         batch = list(range(current_report, current_report + BATCH_SIZE))
 
@@ -132,7 +170,10 @@ def main():
         print(f"  Account: {real_idx + 1} / {len(ACCOUNTS)}  ({account['username']})")
         print(f"  Found  : {found_total}/{TARGET_FOUND}")
         if limited_accs:
-            print(f"  Limited: accounts {[i+1 for i in limited_accs]}")
+            print(f"  Limited: accounts {[i+1 for i in sorted(limited_accs)]}")
+        if all_limit_cycle > 0 or all_limit_step > 0:
+            print(f"  Pauses : cycle {all_limit_cycle+1}/{_MAX_ALL_LIMIT_CYCLES}, "
+                  f"step {all_limit_step}/{len(_ALL_LIMIT_PAUSE_SCHEDULE)}")
         print(f"{'='*60}")
 
         limit_hit = False
@@ -155,22 +196,24 @@ def main():
             )
             found_total += found_in_batch
 
-            # Successful batch — remove this account from limited set if it was there
+            # Successful batch — clear this account from limited set
             if real_idx in limited_accs:
                 limited_accs.discard(real_idx)
                 print(f"[ROTATE] Account {real_idx+1} worked — removed from limited set")
+
+            # If a full batch succeeded without any limit, reset the pause schedule
+            if not limit_hit and all_limit_step > 0:
+                print(f"[LIMIT-ALL] Successful batch — resetting pause schedule")
+                all_limit_step  = 0
+                all_limit_cycle = 0
 
         except Exception as e:
             print(f"\nSession error: {e}")
             print("Saving progress and continuing with next account...")
 
-        # Handle limit hit
+        # Mark this account as limited (NO cookie deletion — re-login doesn't help)
         if limit_hit:
             limited_accs.add(real_idx)
-            # Force re-login next time this account is used
-            delete_cookies(real_idx)
-            print(f"[LIMIT] Account {real_idx+1} ({account['username']}) cookies deleted"
-                  f" — will re-login fresh next time")
 
         # Advance report number only if limit was NOT hit mid-batch
         if not limit_hit:
