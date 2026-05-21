@@ -640,52 +640,113 @@ def _search_via_api(api_session: requests.Session,
 
 
 
-# Backoff schedule (seconds) per limit hit in a session.
-# Index 0 = baseline, index 1 = after 1st limit, 2 = 2nd, etc.
+# ===================================================================
+# NO-LOGIN SESSION (direct URL, no browser login needed)
+# ===================================================================
+
+def _get_session_no_login() -> requests.Session:
+    """
+    Opens browser headlessly, navigates DIRECTLY to the search page
+    (no login at all), extracts cookies, returns a requests.Session.
+
+    Used when the rate limit is IP-based, so account switching/re-login
+    does not help — we just need a fresh session token from the page.
+    """
+    cookie_dict = {}
+    user_agent  = None
+
+    with SB(uc=True, test=False, locale="en", headless=True) as sb:
+        print("   [NO-LOGIN] Navigating to search page (no login)...")
+        sb.activate_cdp_mode(SEARCH_PAGE_URL)
+        sb.sleep(5)
+
+        url = sb.cdp.get_current_url()
+        print(f"   [NO-LOGIN] URL: {url}")
+
+        cookie_dict = _extract_cookies_from_browser(sb)
+        try:
+            user_agent = sb.cdp.get_user_agent()
+        except Exception:
+            pass
+
+    if not cookie_dict:
+        raise Exception("NO-LOGIN: Could not obtain cookies from search page")
+
+    print(f"   [NO-LOGIN] Session ready — cookies: {list(cookie_dict.keys())}")
+    return _build_api_session(cookie_dict, user_agent)
+
+
+# ===================================================================
+# BACKOFF / PAUSE SCHEDULES
+# ===================================================================
+
+# Inter-search delay (seconds) — escalates per rate-limit hit this session
 _BACKOFF_STEPS = [8, 15, 30, 60]
 
+# Pause duration (minutes) when rate limit is hit — cycles through twice then terminates
+_LIMIT_PAUSE_SCHEDULE = [3, 6, 15, 30, 60]
+_MAX_LIMIT_CYCLES     = 2
+
+
+# ===================================================================
+# MAIN ENTRY POINT
+# ===================================================================
 
 def run_search_session(report_numbers: list,
                        found_callback,
                        not_found_callback,
                        found_so_far: int = 0,
                        target: int = 100,
+                       # ── account-based params (ignored when no_login=True) ──
                        account: dict = None,
                        account_idx: int = 0,
                        on_limit_hit=None,
+                       # ── no-login mode ──
+                       no_login: bool = False,
                        error_callback=None) -> int:
     """
-    Get/reuse a valid API session for the given account, then search.
-    found_so_far  : count of found reports BEFORE this batch.
-    target        : stop when found_so_far + found_count >= target.
-    account       : {"username": ..., "password": ...}
-    account_idx   : index of the account (for cookie file naming).
-    on_limit_hit  : callable() -- called when SEARCH_LIMIT_REACHED so main.py
-                    can rotate to the next account immediately.
-    error_callback: callable(report_number, error_msg) -- called after 3 failed
-                    retries instead of not_found_callback.
-    Returns count of found reports in THIS batch.
+    Search a list of report numbers.
+
+    no_login=True (default for IP-rate-limited environments):
+        - Navigates directly to the search page; no browser login.
+        - On SEARCH_LIMIT_REACHED: pauses (dynamic schedule) then
+          refreshes the session and retries the same report internally.
+        - Raises Exception("LIMIT_EXHAUSTED") after 2 full pause cycles.
+
+    no_login=False (legacy account-rotation mode):
+        - Logs in via browser, uses saved session cookies.
+        - Calls on_limit_hit() so main.py can rotate accounts.
     """
     from config import ACCOUNTS
-    if account is None:
-        account = ACCOUNTS[0] if ACCOUNTS else {"username": USERNAME, "password": PASSWORD_B64}
 
     MAX_RETRIES = 3
     found_count = 0
-    limit_hits  = 0                         # rate limit hits this session
-    inter_delay = _BACKOFF_STEPS[0]         # starts at 8s, increases after each hit
+    limit_hits  = 0                     # total rate-limit hits this session
+    inter_delay = _BACKOFF_STEPS[0]     # starts at 8s, escalates after each hit
 
-    print(f"\n[ACCOUNT] Using account {account_idx + 1}: {account['username']}")
-    print(f"[DELAY]   Inter-search delay: {inter_delay}s (increases on rate limit)")
+    # Pause-schedule state (no_login mode only)
+    pause_step  = 0
+    pause_cycle = 0
 
-    # Get session (reuse cookies or fresh browser login)
-    api_session = get_valid_session(account, account_idx)
+    if no_login:
+        print("\n[NO-LOGIN] Mode: direct URL, no account login")
+        print(f"[DELAY]    Inter-search delay: {inter_delay}s (auto-increases on limit)")
+        api_session = _get_session_no_login()
+    else:
+        # ── Legacy login mode ──────────────────────────────────────
+        if account is None:
+            account = ACCOUNTS[0] if ACCOUNTS else {"username": USERNAME, "password": PASSWORD_B64}
+        print(f"\n[ACCOUNT] Using account {account_idx + 1}: {account['username']}")
+        print(f"[DELAY]   Inter-search delay: {inter_delay}s (auto-increases on limit)")
+        # api_session = get_valid_session(account, account_idx)  # ← login via browser
+        # TEMPORARILY USING NO-LOGIN even in account mode for testing:
+        api_session = _get_session_no_login()
 
     for report_num in report_numbers:
 
-        # Global stop check
+        # Global target check
         if found_so_far + found_count >= target:
-            print(f"\n*** TARGET REACHED ({target} found) -- stopping batch early ***")
+            print(f"\n*** TARGET REACHED ({target} found) — stopping batch early ***")
             break
 
         report_str = str(report_num)
@@ -693,87 +754,139 @@ def run_search_session(report_numbers: list,
         print(f"  Checking report: {report_str}")
         print(f"{'='*52}")
 
-        last_error = None
-        success    = False
+        # ── Per-report loop: allows retry after a pause in no_login mode ──
+        need_limit_retry = True
+        while need_limit_retry:
+            need_limit_retry = False
+            last_error       = None
+            success          = False
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            if attempt > 1:
-                print(f"   [RETRY] Attempt {attempt}/{MAX_RETRIES} for report {report_str}...")
-                time.sleep(5)
+            for attempt in range(1, MAX_RETRIES + 1):
+                if attempt > 1:
+                    print(f"   [RETRY] Attempt {attempt}/{MAX_RETRIES} for {report_str}...")
+                    time.sleep(5)
 
-            try:
-                token  = solve_recaptcha(SEARCH_PAGE_URL)
-                result = _search_via_api(api_session, report_str, token)
+                try:
+                    token  = solve_recaptcha(SEARCH_PAGE_URL)
+                    result = _search_via_api(api_session, report_str, token)
 
-                if result is not None:
-                    found_count += 1
-                    found_callback(result)
-                    print(f"   Found in this batch: {found_count}  |  "
-                          f"Global total: {found_so_far + found_count}/{target}")
+                    if result is not None:
+                        found_count += 1
+                        found_callback(result)
+                        print(f"   Found in this batch: {found_count}  |  "
+                              f"Global total: {found_so_far + found_count}/{target}")
 
-                    if found_so_far + found_count >= target:
-                        print(f"\n*** GLOBAL TARGET {target} REACHED -- stopping now ***")
-                        return found_count
-                else:
-                    # Clean "not found" -- definitive, no retry needed
-                    not_found_callback(report_str)
+                        # Reset pause schedule on a successful find
+                        pause_step  = 0
+                        pause_cycle = 0
+
+                        if found_so_far + found_count >= target:
+                            print(f"\n*** GLOBAL TARGET {target} REACHED — stopping now ***")
+                            return found_count
+                    else:
+                        # Definitive not-found — no retry needed
+                        not_found_callback(report_str)
+                        success = True
+                        break
+
                     success = True
                     break
 
-                success = True
-                break
+                except Exception as e:
+                    err        = str(e)
+                    last_error = err
 
-            except Exception as e:
-                err = str(e)
-                last_error = err
+                    # ── RATE LIMIT ─────────────────────────────────────────
+                    if "SEARCH_LIMIT_REACHED" in err:
+                        limit_hits += 1
+                        step        = min(limit_hits, len(_BACKOFF_STEPS) - 1)
+                        inter_delay = _BACKOFF_STEPS[step]
 
-                # Rate limit -- bump delay, rotate account
-                if "SEARCH_LIMIT_REACHED" in err:
-                    limit_hits += 1
-                    step        = min(limit_hits, len(_BACKOFF_STEPS) - 1)
-                    inter_delay = _BACKOFF_STEPS[step]
-                    print(f"\n   [LIMIT] Search limit hit on account {account_idx + 1}.")
-                    print(f"   [LIMIT] Total limit hits this session: {limit_hits}")
-                    print(f"   [BACKOFF] Delay escalated to: {inter_delay}s per search")
-                    if on_limit_hit:
-                        on_limit_hit()
-                        return found_count  # stop batch, main.py will rotate
-                    else:
-                        wait_min = 5
-                        print(f"   [LIMIT] Pausing {wait_min} min before retrying...")
-                        for remaining in range(wait_min * 60, 0, -15):
-                            print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
-                            time.sleep(15)
-                        print("\n   [LIMIT] Retrying same report...")
-                        continue
+                        print(f"\n   [LIMIT] Rate limit hit (total hits: {limit_hits})")
+                        print(f"   [BACKOFF] Inter-search delay → {inter_delay}s")
 
-                # Session expired -- must re-login, propagate up
-                if "SESSION_EXPIRED" in err:
-                    print(f"   Session expired for account {account_idx + 1} -- deleting cookies")
-                    delete_cookies(account_idx)
-                    raise
+                        if no_login:
+                            # Check if we've exhausted all pause cycles
+                            if pause_cycle >= _MAX_LIMIT_CYCLES:
+                                raise Exception(
+                                    f"LIMIT_EXHAUSTED: {_MAX_LIMIT_CYCLES} full pause cycles "
+                                    f"done with no recovery. Rate cap appears permanent for now."
+                                )
 
-                # Missing API key -- fatal
-                if "CAPTCHA_API_KEY" in err:
-                    print(f"\nFATAL: {e}")
-                    raise
+                            wait_min = _LIMIT_PAUSE_SCHEDULE[pause_step]
+                            wait_sec = wait_min * 60
+                            print(f"   [PAUSE] Step {pause_step + 1}/{len(_LIMIT_PAUSE_SCHEDULE)} "
+                                  f"of cycle {pause_cycle + 1}/{_MAX_LIMIT_CYCLES} — "
+                                  f"waiting {wait_min} min...")
 
-                # Generic retriable error
-                print(f"   [ERROR] Attempt {attempt}/{MAX_RETRIES} failed: {err[:120]}")
-                success = False
+                            for remaining in range(wait_sec, 0, -15):
+                                print(f"   [PAUSE] Resuming in {remaining}s...  ", end="\r")
+                                time.sleep(15)
+                            print()
 
-        # After all retries exhausted
-        if not success:
-            print(f"   [ERROR] All {MAX_RETRIES} attempts failed for {report_str}")
-            print(f"   [ERROR] Last error: {last_error}")
-            if error_callback:
-                error_callback(report_str, last_error)
-            else:
-                not_found_callback(report_str)
+                            # Advance schedule
+                            pause_step += 1
+                            if pause_step >= len(_LIMIT_PAUSE_SCHEDULE):
+                                pause_step   = 0
+                                pause_cycle += 1
+                                if pause_cycle < _MAX_LIMIT_CYCLES:
+                                    print(f"   [PAUSE] Cycle {pause_cycle}/{_MAX_LIMIT_CYCLES} "
+                                          f"complete — restarting pause schedule at 3 min")
 
-        # Dynamic inter-search delay (escalates after each rate-limit hit)
+                            # Refresh session and retry this report
+                            print("   [NO-LOGIN] Refreshing session...")
+                            api_session      = _get_session_no_login()
+                            need_limit_retry = True
+                            break   # break attempt loop → while loop retries
+
+                        else:
+                            # Legacy account-rotation path
+                            if on_limit_hit:
+                                on_limit_hit()
+                                return found_count
+                            else:
+                                wait_min = 5
+                                print(f"   [LIMIT] Pausing {wait_min} min...")
+                                for remaining in range(wait_min * 60, 0, -15):
+                                    print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
+                                    time.sleep(15)
+                                print("\n   [LIMIT] Retrying...")
+                                continue
+
+                    # ── SESSION EXPIRED ─────────────────────────────────────
+                    if "SESSION_EXPIRED" in err:
+                        if no_login:
+                            print("   [NO-LOGIN] Session expired — refreshing...")
+                            api_session      = _get_session_no_login()
+                            need_limit_retry = True
+                            break
+                        else:
+                            print(f"   Session expired for account {account_idx + 1}")
+                            delete_cookies(account_idx)
+                            raise
+
+                    # ── FATAL ───────────────────────────────────────────────
+                    if "CAPTCHA_API_KEY" in err or "LIMIT_EXHAUSTED" in err:
+                        print(f"\nFATAL: {e}")
+                        raise
+
+                    # ── Generic retriable error ──────────────────────────────
+                    print(f"   [ERROR] Attempt {attempt}/{MAX_RETRIES} failed: {err[:120]}")
+                    success = False
+
+            # ── End of attempt loop ─────────────────────────────────────────
+            if not need_limit_retry and not success:
+                print(f"   [ERROR] All {MAX_RETRIES} attempts failed for {report_str}")
+                print(f"   [ERROR] Last error: {last_error}")
+                if error_callback:
+                    error_callback(report_str, last_error)
+                else:
+                    not_found_callback(report_str)
+
+        # ── Dynamic inter-search delay ──────────────────────────────────────
         if inter_delay > _BACKOFF_STEPS[0]:
-            print(f"   [DELAY] Waiting {inter_delay}s (backoff active, {limit_hits} limit hits)...")
+            print(f"   [DELAY] Waiting {inter_delay}s "
+                  f"(backoff active, {limit_hits} limit hits)...")
         time.sleep(inter_delay)
 
     return found_count
