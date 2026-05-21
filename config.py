@@ -63,4 +63,4 @@ def get_report_type_label(code: str) -> str:
 
 # --- Output ---
 OUTPUT_FILE   = "crash_reports.xlsx"
-PROGRESS_FILE = "progress.txt"
+PROGRESS_FILE = "progress.txt"

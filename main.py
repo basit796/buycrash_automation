@@ -8,10 +8,12 @@ Usage:
     python main.py --reset          # Reset local progress
     python main.py --start 283746   # Override start number
 
-Session mode: NO-LOGIN
-    - Navigates directly to the search URL (no account login).
-    - Rate-limit pauses and session refresh are handled in searcher.py.
-    - Pause schedule: [3, 6, 15, 30, 60] min × 2 cycles → terminates.
+Session mode: SINGLE ACCOUNT LOGIN
+    - Logs in once via browser; reuses session cookies.
+    - Batch size: 20 reports per batch.
+    - 20-minute pause between every batch.
+    - On SEARCH_LIMIT_REACHED: pauses 10 min and retries — forever, never terminates.
+    - Random 15–35s delay between individual report searches.
 
 Data is saved to:
   - Local Excel  (crash_reports.xlsx)
@@ -19,11 +21,14 @@ Data is saved to:
 """
 import argparse
 import time
-from config import TARGET_FOUND, START_REPORT, ACCOUNTS
+from config import TARGET_FOUND, START_REPORT, USERNAME
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
 from searcher import run_search_session
 import sheets_handler
+
+# Batch size — number of reports searched before a 20-min pause
+BATCH_SIZE = 20
 
 
 # -------------------------------------------------------------------
@@ -31,9 +36,9 @@ import sheets_handler
 # -------------------------------------------------------------------
 
 def on_found(record: dict):
-    # 1. Local Excel — full data, our internal record
+    # 1. Local Excel — full data
     save_found_report(record)
-    # 2. Google Sheets — client fields only: Report Number # + DOI
+    # 2. Google Sheets — Report Number + DOI only
     sheets_handler.save_found(
         report_number    = str(record.get("reportNumber", "")),
         date_of_incident = str(record.get("dateOfIncident", "")),
@@ -46,7 +51,7 @@ def on_not_found(report_number: str):
 
 
 def on_error(report_number: str, error_msg: str):
-    """Called after 3 retries all fail — saves to Errors sheet, NOT Not Found."""
+    """Called after 3 retries all fail — saves to Errors sheet."""
     print(f"   [ERROR FINAL] {report_number}: {error_msg[:80]}")
     sheets_handler.save_error(report_number, error_msg)
     save_not_found_report(f"ERROR:{report_number}")
@@ -63,8 +68,12 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  BuyCrash Report Automation  (+ Google Sheets)")
-    print("  Mode: NO-LOGIN (direct URL, IP-agnostic)")
+    print("  BuyCrash Report Automation")
+    print("  Mode: SINGLE ACCOUNT LOGIN")
+    print(f"  Account : {USERNAME}")
+    print(f"  Batch   : {BATCH_SIZE} reports per batch")
+    print(f"  Pause   : 20 min between batches")
+    print(f"  Delay   : 15–35s random between each search")
     print("=" * 60)
 
     # Test Google Sheets
@@ -90,22 +99,18 @@ def main():
             print(f"Starting from local progress file: {current_report}")
 
     found_total = 0
+    batch_num   = 0
 
     print(f"\nTarget  : Find {TARGET_FOUND} valid reports")
     print(f"Starting: report number {current_report}\n")
 
-    # ── NOTE: Account rotation is commented out (IP-based rate limiting) ──
-    # accounts_info:
-    # for i, acc in enumerate(ACCOUNTS):
-    #     print(f"  Account {i+1}: {acc['username']}")
-
     while found_total < TARGET_FOUND:
-        BATCH_SIZE = 10
+        batch_num += 1
         batch      = list(range(current_report, current_report + BATCH_SIZE))
 
         print(f"\n{'='*60}")
-        print(f"  Batch  : {batch[0]} -> {batch[-1]}")
-        print(f"  Found  : {found_total}/{TARGET_FOUND}")
+        print(f"  Batch #{batch_num:03d}  :  {batch[0]} → {batch[-1]}")
+        print(f"  Found so far : {found_total}/{TARGET_FOUND}")
         print(f"{'='*60}")
 
         try:
@@ -115,36 +120,25 @@ def main():
                 not_found_callback = on_not_found,
                 found_so_far       = found_total,
                 target             = TARGET_FOUND,
-                no_login           = True,           # <── no browser login
                 error_callback     = on_error,
-                # ── Account params commented out (not used in no_login mode) ──
-                # account    = ACCOUNTS[account_idx % len(ACCOUNTS)],
-                # account_idx= account_idx % len(ACCOUNTS),
-                # on_limit_hit = on_limit_hit,
             )
-            found_total += found_in_batch
+            found_total    += found_in_batch
             current_report += BATCH_SIZE
 
         except Exception as e:
             err = str(e)
-            if "LIMIT_EXHAUSTED" in err:
-                print(f"\n[FATAL] {err}")
-                print("[FATAL] Saving progress and terminating.")
-                save_progress(current_report)
-                break
-            else:
-                print(f"\n[ERROR] Batch error: {e}")
-                print("Saving progress and retrying next batch...")
-                current_report += BATCH_SIZE   # skip this batch on unknown error
+            print(f"\n[ERROR] Unexpected batch error: {e}")
+            print("Saving progress and continuing to next batch...")
+            current_report += BATCH_SIZE   # skip broken batch
 
         save_progress(current_report)
-        print(f"\nProgress: {found_total}/{TARGET_FOUND} valid reports found")
+        print(f"\nProgress saved: {found_total}/{TARGET_FOUND} valid reports found")
 
         if found_total >= TARGET_FOUND:
             break
 
-        # Brief pause between batches
-        time.sleep(3)
+        # 20-minute pause between batches (skipped after the final batch)
+        _between_batch_pause(batch_num)
 
     # Final summary
     print("\n" + "=" * 60)
@@ -153,6 +147,20 @@ def main():
     print(f"\nLocal results : crash_reports.xlsx")
     print(f"Cloud results : Google Sheets")
     print("=" * 60)
+
+
+def _between_batch_pause(batch_num: int):
+    """20-minute countdown pause between batches."""
+    wait_sec = 20 * 60
+    print(f"\n{'='*60}")
+    print(f"  [BATCH PAUSE] Batch #{batch_num:03d} done. Waiting 20 min...")
+    print(f"{'='*60}")
+    for remaining in range(wait_sec, 0, -30):
+        mins, secs = divmod(remaining, 60)
+        print(f"   [BATCH PAUSE] Next batch in {mins}m {secs:02d}s...  ", end="\r")
+        time.sleep(30)
+    print()
+    print(f"   [BATCH PAUSE] Starting batch #{batch_num + 1:03d} now.\n")
 
 
 if __name__ == "__main__":

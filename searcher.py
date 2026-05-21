@@ -1,20 +1,23 @@
 """
 searcher.py
 -----------
-Architecture (restored to working API-based approach):
+Architecture: Single-account login mode.
   1. Login ONCE via browser UI  ->  extract session cookies
   2. Build a requests.Session with those cookies + correct headers
   3. For each report: solve captcha via 2Captcha -> POST to API directly
   4. Parse clean JSON response (no page scraping needed)
   5. Save cookies to disk so next run skips login if session still alive
 
-OTP (when site detects unrecognised location):
-  - Handled in the browser during login
-  - User pastes OTP into Google Sheet Start Number!B2
-  - Script polls that cell automatically
+Rate-limit strategy:
+  - Batch size: 20 reports
+  - 20-minute pause between every batch
+  - On SEARCH_LIMIT_REACHED: pause 10 min, refresh session, retry — forever
+    (never terminates due to rate limit alone)
+  - Slower searches with random delay between each report
 """
 import os
 import time
+import random
 import json
 import pickle
 import requests
@@ -27,38 +30,30 @@ from config import (
     CAPTCHA_API_KEY, CAPTCHA_SITE_KEY,
 )
 
-COOKIES_FILE = "session_cookies.pkl"  # default; overridden per account
-
-
-def _cookies_file(account_idx: int) -> str:
-    """Each account gets its own cookie file so sessions don't clash."""
-    return f"session_cookies_{account_idx + 1}.pkl"
+COOKIES_FILE = "session_cookies_1.pkl"   # single account → always slot 1
 
 
 # -------------------------------------------------------------------
 # COOKIE PERSISTENCE
 # -------------------------------------------------------------------
 
-def save_cookies(data: dict, account_idx: int = 0):
-    path = _cookies_file(account_idx)
-    with open(path, "wb") as f:
+def save_cookies(data: dict):
+    with open(COOKIES_FILE, "wb") as f:
         pickle.dump(data, f)
-    print(f"   Session cookies saved to {path}")
+    print(f"   Session cookies saved to {COOKIES_FILE}")
 
 
-def load_cookies(account_idx: int = 0) -> dict:
-    path = _cookies_file(account_idx)
-    if os.path.exists(path):
-        with open(path, "rb") as f:
+def load_cookies() -> dict:
+    if os.path.exists(COOKIES_FILE):
+        with open(COOKIES_FILE, "rb") as f:
             return pickle.load(f)
     return {}
 
 
-def delete_cookies(account_idx: int = 0):
-    path = _cookies_file(account_idx)
-    if os.path.exists(path):
-        os.remove(path)
-        print(f"   Deleted saved cookies for account {account_idx + 1}")
+def delete_cookies():
+    if os.path.exists(COOKIES_FILE):
+        os.remove(COOKIES_FILE)
+        print(f"   Deleted saved cookies")
 
 
 # -------------------------------------------------------------------
@@ -91,8 +86,7 @@ def _test_session(api_session: requests.Session) -> bool:
 def _build_api_session(cookie_dict: dict, user_agent: str = None) -> requests.Session:
     """
     Create a requests.Session pre-loaded with auth cookies.
-    IMPORTANT: also sets x-xsrf-token header from the XSRF-TOKEN cookie
-               (required by the site's CSRF protection on every POST).
+    Sets x-xsrf-token header from the XSRF-TOKEN cookie (required for every POST).
     """
     session = requests.Session()
 
@@ -105,18 +99,17 @@ def _build_api_session(cookie_dict: dict, user_agent: str = None) -> requests.Se
         "Chrome/148.0.0.0 Safari/537.36"
     )
 
-    # x-xsrf-token MUST match the XSRF-TOKEN cookie — required by the API
     xsrf = cookie_dict.get("XSRF-TOKEN", "")
 
     session.headers.update({
-        "User-Agent":       ua,
-        "Content-Type":     "application/json",
-        "Accept":           "application/json, text/plain, */*",
-        "Accept-Language":  "en",
-        "Referer":          SEARCH_PAGE_URL,
-        "Origin":           BASE_URL,
+        "User-Agent":          ua,
+        "Content-Type":        "application/json",
+        "Accept":              "application/json, text/plain, */*",
+        "Accept-Language":     "en",
+        "Referer":             SEARCH_PAGE_URL,
+        "Origin":              BASE_URL,
         "lnbc-client-version": "1.0.145",
-        "x-xsrf-token":    xsrf,        # <-- CSRF header the API requires
+        "x-xsrf-token":        xsrf,
     })
 
     print(f"   API session built — XSRF token: {xsrf[:20]}..." if xsrf else
@@ -206,9 +199,9 @@ def _handle_otp(sb):
     print("")
 
     otp_code = None
-    max_wait  = 3600   # 1 hour
-    elapsed   = 0
-    interval  = 30
+    max_wait = 3600   # 1 hour
+    elapsed  = 0
+    interval = 30
 
     while elapsed < max_wait:
         sb.sleep(interval)
@@ -317,15 +310,17 @@ def _handle_otp(sb):
 # LOGIN VIA BROWSER — returns cookie dict
 # -------------------------------------------------------------------
 
-def _login_via_browser(username: str, password: str, account_idx: int = 0) -> dict:
+def _login_via_browser() -> dict:
     """
-    Opens browser, logs in with given credentials, handles OTP if needed,
-    navigates to search page to confirm session, then extracts cookies.
-    Saves cookies to the correct per-account file.
+    Opens browser, logs in with the single configured account,
+    handles OTP if needed, navigates to search page to confirm session,
+    then extracts and saves cookies.
     Returns cookie dict (empty dict on failure).
     """
     cookie_dict = {}
     user_agent  = None
+    username    = USERNAME
+    password    = PASSWORD_B64
 
     with SB(uc=True, test=False, locale="en", headless=True) as sb:
         print(f"Opening browser for login (account: {username})...")
@@ -384,7 +379,7 @@ def _login_via_browser(username: str, password: str, account_idx: int = 0) -> di
 
         sb.sleep(0.5)
 
-        # Submit
+        # Submit via Enter key
         submitted = False
         for sel in [
             "input[placeholder='Password']",
@@ -432,7 +427,7 @@ def _login_via_browser(username: str, password: str, account_idx: int = 0) -> di
         except Exception:
             pass
 
-        # Navigate to search page to confirm session and pick up any additional cookies
+        # Navigate to search page to confirm session
         print("   Navigating to search page to confirm session...")
         sb.cdp.open(SEARCH_PAGE_URL)
         sb.sleep(5)
@@ -456,7 +451,7 @@ def _login_via_browser(username: str, password: str, account_idx: int = 0) -> di
             pass
 
     if cookie_dict:
-        save_cookies({"cookies": cookie_dict, "user_agent": user_agent}, account_idx)
+        save_cookies({"cookies": cookie_dict, "user_agent": user_agent})
 
     return cookie_dict
 
@@ -465,35 +460,31 @@ def _login_via_browser(username: str, password: str, account_idx: int = 0) -> di
 # GET VALID API SESSION (reuse cookies or fresh login)
 # -------------------------------------------------------------------
 
-def get_valid_session(account: dict, account_idx: int = 0) -> requests.Session:
+def get_valid_session() -> requests.Session:
     """
-    Returns a valid authenticated requests.Session for the given account.
+    Returns a valid authenticated requests.Session.
     Reuses saved cookies if still valid, otherwise re-logs in.
-    account = {"username": "...", "password": "..."}
     """
-    username = account["username"]
-    password = account["password"]
-
-    saved = load_cookies(account_idx)
+    saved = load_cookies()
     if saved:
         cookie_dict = saved.get("cookies", {})
         user_agent  = saved.get("user_agent")
         if cookie_dict:
             api_session = _build_api_session(cookie_dict, user_agent)
-            print(f"   Testing saved session for account {account_idx + 1} ({username})...")
+            print(f"   Testing saved session for {USERNAME}...")
             if _test_session(api_session):
                 return api_session
             else:
-                print(f"   Saved session for account {account_idx + 1} expired — re-logging in")
-                delete_cookies(account_idx)
+                print(f"   Saved session expired — re-logging in")
+                delete_cookies()
 
-    print(f"\nLogging in with account {account_idx + 1}: {username}")
-    cookie_dict = _login_via_browser(username, password, account_idx)
+    print(f"\nLogging in as: {USERNAME}")
+    cookie_dict = _login_via_browser()
 
     if not cookie_dict:
-        raise Exception(f"Login failed for account {account_idx + 1} ({username})")
+        raise Exception(f"Login failed for {USERNAME}")
 
-    saved = load_cookies(account_idx)
+    saved = load_cookies()
     ua    = saved.get("user_agent") if saved else None
     return _build_api_session(cookie_dict, ua)
 
@@ -550,18 +541,18 @@ def solve_recaptcha(page_url: str) -> str:
 
 
 # -------------------------------------------------------------------
-# SEARCH ONE REPORT VIA API — the core function
+# SEARCH ONE REPORT VIA API
 # -------------------------------------------------------------------
 
 def _search_via_api(api_session: requests.Session,
                     report_number: str,
                     captcha_token: str) -> dict:
     """
-    POST to /search-svc/ssrqop/search with captcha token and report number.
+    POST to the search API with captcha token and report number.
     Returns record dict if found, None if not found.
     Raises Exception("SESSION_EXPIRED") if 401/403.
+    Raises Exception("SEARCH_LIMIT_REACHED") on rate limit.
     """
-
     payload = {
         "fields": {
             "state":             STATE,
@@ -577,7 +568,6 @@ def _search_via_api(api_session: requests.Session,
         "page": 1,
     }
 
-    # ── DEBUG: log exactly what we're sending ──────────────────────
     print(f"\n   [DEBUG] POST {SEARCH_API_URL}")
     print(f"   [DEBUG] Report number  : {report_number}")
     print(f"   [DEBUG] Token length   : {len(captcha_token)}")
@@ -585,12 +575,9 @@ def _search_via_api(api_session: requests.Session,
     print(f"   [DEBUG] x-xsrf-token  : {api_session.headers.get('x-xsrf-token', 'MISSING')[:30]}...")
     print(f"   [DEBUG] Cookies present: {list(api_session.cookies.keys())}")
 
-    solve_time = time.time()
-
     resp = api_session.post(SEARCH_API_URL, json=payload, timeout=30)
 
-    elapsed = time.time() - solve_time
-    print(f"   [DEBUG] Response in {elapsed:.1f}s — HTTP {resp.status_code}")
+    print(f"   [DEBUG] HTTP {resp.status_code}")
     print(f"   [DEBUG] Full response  : {resp.text[:400]}")
 
     if resp.status_code == 200:
@@ -599,7 +586,6 @@ def _search_via_api(api_session: requests.Session,
 
         if code == "SEARCH_LIMIT_REACHED":
             print("   [LIMIT] Site search limit reached for this session.")
-            print("   [LIMIT] This is the site's own rate cap — not a 2Captcha issue.")
             raise Exception("SEARCH_LIMIT_REACHED")
 
         if code == "VALIDATION_ERROR":
@@ -608,23 +594,29 @@ def _search_via_api(api_session: requests.Session,
             for m in msgs:
                 if m.get("fieldName") == "captchaToken":
                     print("   [DEBUG] CAPTCHA TOKEN REJECTED by server")
-                    print("          Possible reasons:")
-                    print("          1. Token expired (>2 min between solve and use)")
-                    print("          2. XSRF-TOKEN mismatch")
-                    print("          3. Site key changed")
             return None
 
         if code == "OK":
             records = data.get("data", {}).get("records", [])
             print(f"   [DEBUG] Records returned: {len(records)}")
-            if records and len(records) > 0 and len(records[0]) > 0:
-                record = records[0][0]
-                print(f"   [DEBUG] Raw record keys: {list(record.keys())}")
-                record["reportTypeLabel"] = get_report_type_label(
-                    record.get("reportType", "U")
+
+            # Pick the last record group that has actual data (reportNumber not None)
+            real_record = None
+            for group in reversed(records):
+                if group and len(group) > 0:
+                    candidate = group[0]
+                    if candidate.get("reportNumber") is not None:
+                        real_record = candidate
+                        break
+
+            if real_record:
+                print(f"   [DEBUG] Raw record keys: {list(real_record.keys())}")
+                real_record["reportTypeLabel"] = get_report_type_label(
+                    real_record.get("reportType") or "U"
                 )
-                return record
-            print("   [DEBUG] OK response but 0 records — report not found")
+                return real_record
+
+            print("   [DEBUG] OK response but 0 usable records — report not found")
             return None
 
         print(f"   [DEBUG] Unexpected response code: {code}")
@@ -639,53 +631,63 @@ def _search_via_api(api_session: requests.Session,
         return None
 
 
+# -------------------------------------------------------------------
+# INTER-SEARCH RANDOM DELAY (slower, human-like)
+# -------------------------------------------------------------------
 
-# ===================================================================
-# NO-LOGIN SESSION (direct URL, no browser login needed)
-# ===================================================================
-
-def _get_session_no_login() -> requests.Session:
+def _random_search_delay():
     """
-    Opens browser headlessly, navigates DIRECTLY to the search page
-    (no login at all), extracts cookies, returns a requests.Session.
-
-    Used when the rate limit is IP-based, so account switching/re-login
-    does not help — we just need a fresh session token from the page.
+    Wait a random amount between 15–35 seconds between each search.
+    Mimics slower, human-like browsing to reduce rate-limit pressure.
     """
-    cookie_dict = {}
-    user_agent  = None
-
-    with SB(uc=True, test=False, locale="en", headless=True) as sb:
-        print("   [NO-LOGIN] Navigating to search page (no login)...")
-        sb.activate_cdp_mode(SEARCH_PAGE_URL)
-        sb.sleep(5)
-
-        url = sb.cdp.get_current_url()
-        print(f"   [NO-LOGIN] URL: {url}")
-
-        cookie_dict = _extract_cookies_from_browser(sb)
-        try:
-            user_agent = sb.cdp.get_user_agent()
-        except Exception:
-            pass
-
-    if not cookie_dict:
-        raise Exception("NO-LOGIN: Could not obtain cookies from search page")
-
-    print(f"   [NO-LOGIN] Session ready — cookies: {list(cookie_dict.keys())}")
-    return _build_api_session(cookie_dict, user_agent)
+    delay = random.uniform(15, 35)
+    print(f"   [DELAY] Waiting {delay:.1f}s before next search...")
+    time.sleep(delay)
 
 
-# ===================================================================
-# BACKOFF / PAUSE SCHEDULES
-# ===================================================================
+# -------------------------------------------------------------------
+# BETWEEN-BATCH PAUSE — 20 minutes, with countdown
+# -------------------------------------------------------------------
 
-# Inter-search delay (seconds) — escalates per rate-limit hit this session
-_BACKOFF_STEPS = [8, 15, 30, 60]
+def _batch_pause(batch_num: int):
+    """
+    Pause 20 minutes between batches.
+    Prints a countdown every 30 seconds.
+    """
+    wait_sec = 20 * 60   # 20 minutes
+    print(f"\n{'='*60}")
+    print(f"  [BATCH PAUSE] Batch {batch_num} complete.")
+    print(f"  Pausing 20 minutes before next batch...")
+    print(f"{'='*60}")
+    for remaining in range(wait_sec, 0, -30):
+        mins, secs = divmod(remaining, 60)
+        print(f"   [BATCH PAUSE] Resuming in {mins}m {secs:02d}s...  ", end="\r")
+        time.sleep(30)
+    print()
+    print("   [BATCH PAUSE] Resuming now.\n")
 
-# Pause duration (minutes) when rate limit is hit — cycles through twice then terminates
-_LIMIT_PAUSE_SCHEDULE = [3, 6, 15, 30, 60]
-_MAX_LIMIT_CYCLES     = 2
+
+# -------------------------------------------------------------------
+# RATE-LIMIT PAUSE — 10 minutes, infinite retries
+# -------------------------------------------------------------------
+
+def _limit_pause(hit_count: int, api_session: requests.Session) -> requests.Session:
+    """
+    On SEARCH_LIMIT_REACHED: pause 10 minutes, refresh session, return new session.
+    Called every time a limit is hit — no maximum, never terminates.
+    """
+    wait_sec = 10 * 60   # 10 minutes
+    print(f"\n   [LIMIT] Rate limit hit #{hit_count}. Pausing 10 minutes...")
+    for remaining in range(wait_sec, 0, -30):
+        mins, secs = divmod(remaining, 60)
+        print(f"   [LIMIT] Resuming in {mins}m {secs:02d}s...  ", end="\r")
+        time.sleep(30)
+    print()
+    print("   [LIMIT] Refreshing session after rate-limit pause...")
+    delete_cookies()
+    new_session = get_valid_session()
+    print("   [LIMIT] Session refreshed. Retrying...\n")
+    return new_session
 
 
 # ===================================================================
@@ -697,50 +699,29 @@ def run_search_session(report_numbers: list,
                        not_found_callback,
                        found_so_far: int = 0,
                        target: int = 100,
-                       # ── account-based params (ignored when no_login=True) ──
+                       error_callback=None,
+                       # Legacy params kept for signature compatibility — ignored
                        account: dict = None,
                        account_idx: int = 0,
                        on_limit_hit=None,
-                       # ── no-login mode ──
-                       no_login: bool = False,
-                       error_callback=None) -> int:
+                       no_login: bool = False) -> int:
     """
-    Search a list of report numbers.
+    Search a list of report numbers using a single logged-in account.
 
-    no_login=True (default for IP-rate-limited environments):
-        - Navigates directly to the search page; no browser login.
-        - On SEARCH_LIMIT_REACHED: pauses (dynamic schedule) then
-          refreshes the session and retries the same report internally.
-        - Raises Exception("LIMIT_EXHAUSTED") after 2 full pause cycles.
-
-    no_login=False (legacy account-rotation mode):
-        - Logs in via browser, uses saved session cookies.
-        - Calls on_limit_hit() so main.py can rotate accounts.
+    Behaviour:
+    - Login once; reuse session until it expires (then auto-relogin).
+    - 15–35s random delay between each individual report search.
+    - On SEARCH_LIMIT_REACHED: pause 10 min → refresh session → retry
+      the same report — indefinitely, until it succeeds.
+    - 3 retries on generic errors before calling error_callback.
+    - Batch pausing (20 min) is handled by main.py between batches.
     """
-    from config import ACCOUNTS
+    MAX_RETRIES  = 3
+    found_count  = 0
+    limit_hits   = 0
 
-    MAX_RETRIES = 3
-    found_count = 0
-    limit_hits  = 0                     # total rate-limit hits this session
-    inter_delay = _BACKOFF_STEPS[0]     # starts at 8s, escalates after each hit
-
-    # Pause-schedule state (no_login mode only)
-    pause_step  = 0
-    pause_cycle = 0
-
-    if no_login:
-        print("\n[NO-LOGIN] Mode: direct URL, no account login")
-        print(f"[DELAY]    Inter-search delay: {inter_delay}s (auto-increases on limit)")
-        api_session = _get_session_no_login()
-    else:
-        # ── Legacy login mode ──────────────────────────────────────
-        if account is None:
-            account = ACCOUNTS[0] if ACCOUNTS else {"username": USERNAME, "password": PASSWORD_B64}
-        print(f"\n[ACCOUNT] Using account {account_idx + 1}: {account['username']}")
-        print(f"[DELAY]   Inter-search delay: {inter_delay}s (auto-increases on limit)")
-        # api_session = get_valid_session(account, account_idx)  # ← login via browser
-        # TEMPORARILY USING NO-LOGIN even in account mode for testing:
-        api_session = _get_session_no_login()
+    print(f"\n[SESSION] Logging in as: {USERNAME}")
+    api_session = get_valid_session()
 
     for report_num in report_numbers:
 
@@ -754,12 +735,10 @@ def run_search_session(report_numbers: list,
         print(f"  Checking report: {report_str}")
         print(f"{'='*52}")
 
-        # ── Per-report loop: allows retry after a pause in no_login mode ──
-        need_limit_retry = True
-        while need_limit_retry:
-            need_limit_retry = False
-            last_error       = None
-            success          = False
+        # Per-report retry loop — keeps going on limit hits
+        while True:
+            last_error = None
+            success    = False
 
             for attempt in range(1, MAX_RETRIES + 1):
                 if attempt > 1:
@@ -775,19 +754,11 @@ def run_search_session(report_numbers: list,
                         found_callback(result)
                         print(f"   Found in this batch: {found_count}  |  "
                               f"Global total: {found_so_far + found_count}/{target}")
-
-                        # Reset pause schedule on a successful find
-                        pause_step  = 0
-                        pause_cycle = 0
-
                         if found_so_far + found_count >= target:
-                            print(f"\n*** GLOBAL TARGET {target} REACHED — stopping now ***")
+                            print(f"\n*** GLOBAL TARGET {target} REACHED ***")
                             return found_count
                     else:
-                        # Definitive not-found — no retry needed
                         not_found_callback(report_str)
-                        success = True
-                        break
 
                     success = True
                     break
@@ -796,97 +767,49 @@ def run_search_session(report_numbers: list,
                     err        = str(e)
                     last_error = err
 
-                    # ── RATE LIMIT ─────────────────────────────────────────
+                    # ── RATE LIMIT: pause 10 min, refresh, retry forever ──
                     if "SEARCH_LIMIT_REACHED" in err:
-                        limit_hits += 1
-                        step        = min(limit_hits, len(_BACKOFF_STEPS) - 1)
-                        inter_delay = _BACKOFF_STEPS[step]
+                        limit_hits  += 1
+                        api_session  = _limit_pause(limit_hits, api_session)
+                        # Break the attempt loop → outer while True retries
+                        # the same report_str from scratch
+                        break
 
-                        print(f"\n   [LIMIT] Rate limit hit (total hits: {limit_hits})")
-                        print(f"   [BACKOFF] Inter-search delay → {inter_delay}s")
-
-                        if no_login:
-                            # Check if we've exhausted all pause cycles
-                            if pause_cycle >= _MAX_LIMIT_CYCLES:
-                                raise Exception(
-                                    f"LIMIT_EXHAUSTED: {_MAX_LIMIT_CYCLES} full pause cycles "
-                                    f"done with no recovery. Rate cap appears permanent for now."
-                                )
-
-                            wait_min = _LIMIT_PAUSE_SCHEDULE[pause_step]
-                            wait_sec = wait_min * 60
-                            print(f"   [PAUSE] Step {pause_step + 1}/{len(_LIMIT_PAUSE_SCHEDULE)} "
-                                  f"of cycle {pause_cycle + 1}/{_MAX_LIMIT_CYCLES} — "
-                                  f"waiting {wait_min} min...")
-
-                            for remaining in range(wait_sec, 0, -15):
-                                print(f"   [PAUSE] Resuming in {remaining}s...  ", end="\r")
-                                time.sleep(15)
-                            print()
-
-                            # Advance schedule
-                            pause_step += 1
-                            if pause_step >= len(_LIMIT_PAUSE_SCHEDULE):
-                                pause_step   = 0
-                                pause_cycle += 1
-                                if pause_cycle < _MAX_LIMIT_CYCLES:
-                                    print(f"   [PAUSE] Cycle {pause_cycle}/{_MAX_LIMIT_CYCLES} "
-                                          f"complete — restarting pause schedule at 3 min")
-
-                            # Refresh session and retry this report
-                            print("   [NO-LOGIN] Refreshing session...")
-                            api_session      = _get_session_no_login()
-                            need_limit_retry = True
-                            break   # break attempt loop → while loop retries
-
-                        else:
-                            # Legacy account-rotation path
-                            if on_limit_hit:
-                                on_limit_hit()
-                                return found_count
-                            else:
-                                wait_min = 5
-                                print(f"   [LIMIT] Pausing {wait_min} min...")
-                                for remaining in range(wait_min * 60, 0, -15):
-                                    print(f"   [LIMIT] Resuming in {remaining}s...", end="\r")
-                                    time.sleep(15)
-                                print("\n   [LIMIT] Retrying...")
-                                continue
-
-                    # ── SESSION EXPIRED ─────────────────────────────────────
+                    # ── SESSION EXPIRED: re-login, retry ──
                     if "SESSION_EXPIRED" in err:
-                        if no_login:
-                            print("   [NO-LOGIN] Session expired — refreshing...")
-                            api_session      = _get_session_no_login()
-                            need_limit_retry = True
-                            break
-                        else:
-                            print(f"   Session expired for account {account_idx + 1}")
-                            delete_cookies(account_idx)
-                            raise
+                        print("   [SESSION] Session expired — re-logging in...")
+                        delete_cookies()
+                        api_session = get_valid_session()
+                        break   # retry this report
 
-                    # ── FATAL ───────────────────────────────────────────────
-                    if "CAPTCHA_API_KEY" in err or "LIMIT_EXHAUSTED" in err:
-                        print(f"\nFATAL: {e}")
+                    # ── Fatal errors: propagate immediately ──
+                    if "CAPTCHA_API_KEY" in err:
+                        print(f"\n[FATAL] {e}")
                         raise
 
-                    # ── Generic retriable error ──────────────────────────────
+                    # ── Generic retriable error ──
                     print(f"   [ERROR] Attempt {attempt}/{MAX_RETRIES} failed: {err[:120]}")
                     success = False
 
-            # ── End of attempt loop ─────────────────────────────────────────
-            if not need_limit_retry and not success:
-                print(f"   [ERROR] All {MAX_RETRIES} attempts failed for {report_str}")
-                print(f"   [ERROR] Last error: {last_error}")
-                if error_callback:
-                    error_callback(report_str, last_error)
-                else:
-                    not_found_callback(report_str)
+            else:
+                # Attempt loop finished without a break (all 3 failed generically)
+                if not success:
+                    print(f"   [ERROR] All {MAX_RETRIES} attempts failed for {report_str}")
+                    if error_callback:
+                        error_callback(report_str, last_error or "Unknown error")
+                    else:
+                        not_found_callback(report_str)
+                    break  # move to next report
 
-        # ── Dynamic inter-search delay ──────────────────────────────────────
-        if inter_delay > _BACKOFF_STEPS[0]:
-            print(f"   [DELAY] Waiting {inter_delay}s "
-                  f"(backoff active, {limit_hits} limit hits)...")
-        time.sleep(inter_delay)
+            # If success or all generic retries exhausted → move on
+            if success or (last_error and
+                           "SEARCH_LIMIT_REACHED" not in last_error and
+                           "SESSION_EXPIRED"      not in last_error):
+                break
+            # Otherwise the while True continues (limit/session retry)
+
+        # Random inter-search delay (only if more reports remain)
+        if report_num != report_numbers[-1]:
+            _random_search_delay()
 
     return found_count
