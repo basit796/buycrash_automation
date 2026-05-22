@@ -8,12 +8,11 @@ Slot model (defined in config.py):
   Slot 0,1,2  — logged-in accounts (ACCOUNTS[0..2])
   Slot 3      — no-login (direct URL, no credentials)
 
-This module exposes:
-  get_session_for_slot(slot_idx)   -> requests.Session  (or raises)
-  run_slot_batch(slot_idx, report_numbers, ...)  -> (found_count, status)
-    status: "ok" | "limit" | "otp_timeout"
+Key change: run_slot_batch now returns (found_count, next_report, status)
+  next_report = the report number to continue from (accounts for mid-batch stops)
 """
 import os
+import re
 import time
 import random
 import pickle
@@ -28,6 +27,64 @@ from config import (
     SEARCH_DELAY_MIN, SEARCH_DELAY_MAX,
     OTP_WAIT_SEC,
 )
+
+
+# -------------------------------------------------------------------
+# LIVE SITE KEY  (extracted from page; falls back to config value)
+# -------------------------------------------------------------------
+
+# Module-level cache — refreshed every time a browser session opens
+_live_site_key: str = None
+
+
+def _extract_site_key_from_browser(sb) -> str:
+    """
+    Try to read the reCAPTCHA site key directly from the live page.
+    Attempts:
+      1. data-sitekey attribute on any element
+      2. Regex scan of full page HTML for a reCAPTCHA key pattern
+    Returns the key string, or None if not found.
+    """
+    # Method 1: data-sitekey attribute
+    try:
+        key = sb.cdp.evaluate("""
+            (function() {
+                var el = document.querySelector('[data-sitekey]');
+                return el ? el.getAttribute('data-sitekey') : null;
+            })()
+        """)
+        if key and len(str(key)) > 20:
+            return str(key).strip()
+    except Exception:
+        pass
+
+    # Method 2: regex in full page source
+    try:
+        html = sb.cdp.get_page_source()
+        match = re.search(r'6[A-Za-z0-9_-]{38,42}', html)
+        if match:
+            return match.group(0)
+    except Exception:
+        pass
+
+    return None
+
+
+def _refresh_site_key(sb):
+    """Called after the browser loads the search page to update the cached key."""
+    global _live_site_key
+    found = _extract_site_key_from_browser(sb)
+    if found:
+        if found != _live_site_key:
+            print(f"   [CAPTCHA] Site key updated: {found[:30]}...")
+        _live_site_key = found
+    else:
+        print(f"   [CAPTCHA] Could not extract live site key — using config fallback")
+
+
+def get_active_site_key() -> str:
+    """Return the most recently extracted live key, or the config fallback."""
+    return _live_site_key or CAPTCHA_SITE_KEY
 
 
 # -------------------------------------------------------------------
@@ -138,7 +195,7 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
     """
     Attempt to complete OTP flow by reading code from Google Sheet B2.
     Waits up to OTP_WAIT_SEC seconds.
-    Returns True if OTP was completed, False if timed out.
+    Returns True if OTP completed, False if timed out.
     """
     import sheets_handler
 
@@ -147,10 +204,9 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
     print("=" * 60)
     print(f"  OTP REQUIRED — Slot {slot_idx} ({account_label})")
     print(f"  Waiting up to {wait_sec // 60} min for OTP in Sheet B2")
-    print(f"  *** Please paste the OTP for [{account_label}] into cell B2 ***")
+    print(f"  *** Paste OTP for [{account_label}] into cell B2 ***")
     print("=" * 60)
 
-    # Select Email radio
     for sel in ["input[type='radio'][value*='mail']", "input[type='radio']:first-of-type"]:
         try:
             sb.cdp.click(sel)
@@ -159,7 +215,6 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
             continue
     sb.sleep(1)
 
-    # Click Send Code
     for sel in ["button:contains('Send Code')", "button:contains('Continue')", "button[type='submit']"]:
         try:
             sb.cdp.click(sel)
@@ -169,16 +224,15 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
             continue
     sb.sleep(2)
 
-    # Poll sheet for OTP
     elapsed  = 0
     interval = 30
     otp_code = None
 
     while elapsed < wait_sec:
         sb.sleep(interval)
-        elapsed += interval
-        remaining = wait_sec - elapsed
-        print(f"   [OTP] Waiting... {elapsed}s elapsed, {remaining}s remaining")
+        elapsed   += interval
+        remaining  = wait_sec - elapsed
+        print(f"   [OTP] {elapsed}s elapsed, {remaining}s remaining")
         try:
             code = sheets_handler.get_otp_from_sheet()
             if code:
@@ -190,10 +244,9 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
             print(f"   [OTP] Sheet poll error: {e}")
 
     if not otp_code:
-        print(f"   [OTP] Timeout — no OTP received for slot {slot_idx} ({account_label})")
+        print(f"   [OTP] Timeout — no OTP for slot {slot_idx} ({account_label})")
         return False
 
-    # Wait for passcode page
     for _ in range(15):
         sb.sleep(1)
         try:
@@ -204,9 +257,8 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
             pass
 
     sb.sleep(1)
-
-    # Fill passcode
     filled = False
+
     for sel in [
         "input[name*='passcode']", "input[id*='passcode']",
         "input[name*='Passcode']", "input[id*='Passcode']",
@@ -263,12 +315,13 @@ def _handle_otp(sb, slot_idx: int, account_label: str) -> bool:
 
 
 # -------------------------------------------------------------------
-# LOGIN VIA BROWSER  (slot 0-2 only)
+# LOGIN VIA BROWSER  (slots 0-2)
 # -------------------------------------------------------------------
 
 def _login_via_browser(slot_idx: int) -> dict:
     """
     Log in using ACCOUNTS[slot_idx]. Handle OTP if needed.
+    Also refreshes the live site key while browser is open.
     Returns cookie dict, or empty dict on failure.
     Raises Exception("OTP_TIMEOUT") if OTP screen appears but times out.
     """
@@ -285,7 +338,6 @@ def _login_via_browser(slot_idx: int) -> dict:
         sb.activate_cdp_mode(BASE_URL + "/ui/home")
         sb.sleep(4)
 
-        # Click Sign In
         for strategy in [
             lambda: sb.cdp.find_element_by_text("Sign In").click(),
             lambda: sb.cdp.click("button:contains('Sign In')"),
@@ -299,7 +351,6 @@ def _login_via_browser(slot_idx: int) -> dict:
                 continue
         sb.sleep(2)
 
-        # User ID
         for sel in ["input[placeholder='User ID']", "input[name='username']", "input[type='text']"]:
             try:
                 sb.cdp.click(sel)
@@ -310,7 +361,6 @@ def _login_via_browser(slot_idx: int) -> dict:
                 continue
         sb.sleep(0.5)
 
-        # Password
         for sel in ["input[placeholder='Password']", "input[name='password']", "input[type='password']"]:
             try:
                 sb.cdp.click(sel)
@@ -321,7 +371,6 @@ def _login_via_browser(slot_idx: int) -> dict:
                 continue
         sb.sleep(0.5)
 
-        # Submit
         submitted = False
         for sel in ["input[placeholder='Password']", "input[name='password']", "input[type='password']"]:
             try:
@@ -346,7 +395,6 @@ def _login_via_browser(slot_idx: int) -> dict:
                     continue
         sb.sleep(6)
 
-        # OTP check
         url = sb.cdp.get_current_url()
         print(f"   URL after login: {url}")
         if "otp" in url.lower():
@@ -354,7 +402,6 @@ def _login_via_browser(slot_idx: int) -> dict:
             if not otp_ok:
                 raise Exception("OTP_TIMEOUT")
 
-        # Verify login
         try:
             body = sb.cdp.get_text("body")
             if "User ID" in body and "Sign In" in body[:500]:
@@ -363,13 +410,15 @@ def _login_via_browser(slot_idx: int) -> dict:
         except Exception:
             pass
 
-        # Confirm search page
         sb.cdp.open(SEARCH_PAGE_URL)
         sb.sleep(5)
         current_url = sb.cdp.get_current_url()
         if "search" not in current_url.lower():
             print(f"   [SLOT {slot_idx}] Did not reach search page after login")
             return {}
+
+        # Refresh live site key while browser is on the search page
+        _refresh_site_key(sb)
 
         cookie_dict = _extract_cookies(sb)
         try:
@@ -397,6 +446,10 @@ def _get_no_login_session() -> requests.Session:
         sb.activate_cdp_mode(SEARCH_PAGE_URL)
         sb.sleep(5)
         print(f"   URL: {sb.cdp.get_current_url()}")
+
+        # Refresh live site key while browser is on the search page
+        _refresh_site_key(sb)
+
         cookie_dict = _extract_cookies(sb)
         try:
             user_agent = sb.cdp.get_user_agent()
@@ -426,7 +479,6 @@ def get_session_for_slot(slot_idx: int) -> requests.Session:
     if slot_idx == NO_LOGIN_SLOT:
         return _get_no_login_session()
 
-    # Try saved cookies first
     saved = _load_cookies(slot_idx)
     if saved:
         cookie_dict = saved.get("cookies", {})
@@ -438,7 +490,6 @@ def get_session_for_slot(slot_idx: int) -> requests.Session:
             print(f"   [SLOT {slot_idx}] Saved session expired — re-logging in")
             _delete_cookies(slot_idx)
 
-    # Fresh login
     cookie_dict = _login_via_browser(slot_idx)
     if not cookie_dict:
         raise Exception(f"LOGIN_FAILED for slot {slot_idx}")
@@ -449,18 +500,20 @@ def get_session_for_slot(slot_idx: int) -> requests.Session:
 
 
 # -------------------------------------------------------------------
-# CAPTCHA
+# CAPTCHA  — always uses the live site key with config as fallback
 # -------------------------------------------------------------------
 
 def solve_recaptcha(page_url: str) -> str:
     if not CAPTCHA_API_KEY:
         raise Exception("CAPTCHA_API_KEY missing in .env")
 
-    print("   Submitting CAPTCHA to 2Captcha...")
+    site_key = get_active_site_key()
+    print(f"   Submitting CAPTCHA (site key: {site_key[:20]}...)")
+
     resp = requests.post("http://2captcha.com/in.php", data={
         "key":       CAPTCHA_API_KEY,
         "method":    "userrecaptcha",
-        "googlekey": CAPTCHA_SITE_KEY,
+        "googlekey": site_key,          # live key, not hardcoded
         "pageurl":   page_url,
         "json":      1,
     }, timeout=30)
@@ -515,7 +568,6 @@ def _search_via_api(api_session: requests.Session,
     }
 
     print(f"   [DEBUG] POST report={report_number} token_len={len(captcha_token)}")
-
     resp = api_session.post(SEARCH_API_URL, json=payload, timeout=30)
     print(f"   [DEBUG] HTTP {resp.status_code} | {resp.text[:300]}")
 
@@ -535,7 +587,6 @@ def _search_via_api(api_session: requests.Session,
             records = data.get("data", {}).get("records", [])
             print(f"   [DEBUG] Record groups: {len(records)}")
 
-            # Pick last group where reportNumber is not None
             real_record = None
             for group in reversed(records):
                 if group and group[0].get("reportNumber") is not None:
@@ -586,26 +637,36 @@ def run_slot_batch(slot_idx: int,
     """
     Search report_numbers using api_session.
 
-    Returns (found_count, status) where status is one of:
-      "ok"          — completed normally
-      "limit"       — SEARCH_LIMIT_REACHED mid-batch
-      "session"     — SESSION_EXPIRED and could not recover
+    Returns (found_count, next_report, status) where:
+      found_count  — number of reports found in this batch
+      next_report  — the report number to resume from next
+                     (= exactly where we stopped, NOT start + BATCH_SIZE)
+      status       — "ok"      completed the full batch normally
+                   | "limit"   SEARCH_LIMIT_REACHED mid-batch
+                   | "session" SESSION_EXPIRED mid-batch
 
-    found_count is always the number found before any early exit.
+    This means if slot hits limit on report #4 out of 15,
+    next_report = report_numbers[3] so the next slot
+    continues from that exact report, not report 16.
     """
     MAX_RETRIES = 3
     found_count = 0
     slot_label  = f"SLOT {slot_idx}" if slot_idx < NO_LOGIN_SLOT else "SLOT 3/NO-LOGIN"
 
-    for report_num in report_numbers:
+    # Default: if we complete everything, next slot starts after this batch
+    next_report = report_numbers[-1] + 1
+
+    for i, report_num in enumerate(report_numbers):
 
         if found_so_far + found_count >= target:
             print(f"\n*** TARGET REACHED — stopping slot {slot_idx} early ***")
+            next_report = report_num   # resume here if needed
             break
 
         report_str = str(report_num)
         print(f"\n{'='*52}")
-        print(f"  [{slot_label}] Report: {report_str}")
+        print(f"  [{slot_label}] Report: {report_str}  "
+              f"({i+1}/{len(report_numbers)} in this slot)")
         print(f"{'='*52}")
 
         last_error = None
@@ -627,7 +688,8 @@ def run_slot_batch(slot_idx: int,
                           f"Global: {found_so_far + found_count}/{target}")
                     if found_so_far + found_count >= target:
                         print(f"\n*** GLOBAL TARGET {target} REACHED ***")
-                        return found_count, "ok"
+                        next_report = report_num + 1
+                        return found_count, next_report, "ok"
                 else:
                     not_found_callback(report_str)
 
@@ -639,15 +701,18 @@ def run_slot_batch(slot_idx: int,
                 last_error = err
 
                 if "SEARCH_LIMIT_REACHED" in err:
-                    print(f"   [{slot_label}] SEARCH_LIMIT_REACHED — stopping slot")
-                    return found_count, "limit"
+                    print(f"   [{slot_label}] SEARCH_LIMIT_REACHED on report "
+                          f"{report_str} (#{i+1}/{len(report_numbers)})")
+                    print(f"   [{slot_label}] Next slot will resume from {report_str}")
+                    # next_report = THIS report so it gets retried by the next slot
+                    return found_count, report_num, "limit"
 
                 if "SESSION_EXPIRED" in err:
-                    print(f"   [{slot_label}] Session expired mid-batch")
-                    return found_count, "session"
+                    print(f"   [{slot_label}] Session expired on report {report_str}")
+                    return found_count, report_num, "session"
 
                 if "CAPTCHA_API_KEY" in err:
-                    raise   # fatal
+                    raise   # fatal — propagate up
 
                 print(f"   [ERROR] Attempt {attempt}/{MAX_RETRIES}: {err[:120]}")
 
@@ -657,9 +722,10 @@ def run_slot_batch(slot_idx: int,
                 error_callback(report_str, last_error or "Unknown error")
             else:
                 not_found_callback(report_str)
+            # On generic failure we move on to the next report (don't stall the slot)
 
-        # Inter-search delay (skip after last report)
-        if report_num != report_numbers[-1]:
+        # Inter-search delay (skip after last report in batch)
+        if i < len(report_numbers) - 1:
             _random_delay()
 
-    return found_count, "ok"
+    return found_count, next_report, "ok"

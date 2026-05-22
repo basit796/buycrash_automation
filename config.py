@@ -41,12 +41,15 @@ PASSWORD_B64 = ACCOUNTS[0]["password"] if ACCOUNTS else ""
 #   Slots 0-2 : ACCOUNTS[0], ACCOUNTS[1], ACCOUNTS[2]  (logged-in)
 #   Slot    3 : NO-LOGIN (direct URL, no credentials)
 # ===================================================================
-TOTAL_SLOTS      = 4          # 3 accounts + 1 no-login
-NO_LOGIN_SLOT    = 3          # index of the no-login slot
-BATCH_SIZE       = 15         # reports per slot per cycle
-INTER_BATCH_PAUSE_SEC  = 180  # 3 min pause between slots
-LIMIT_PAUSE_SEC        = 300  # 5 min pause then skip to next slot on SEARCH_LIMIT_REACHED
-OTP_WAIT_SEC           = 1800 # 30 min wait for OTP before moving to next account
+TOTAL_SLOTS            = 4     # 3 accounts + 1 no-login
+NO_LOGIN_SLOT          = 3     # index of the no-login slot
+BATCH_SIZE             = 15    # reports per slot per cycle
+INTER_BATCH_PAUSE_SEC  = 180   # 3 min pause between slots
+LIMIT_PAUSE_SEC        = 300   # 5 min pause then skip to next slot on SEARCH_LIMIT_REACHED
+OTP_WAIT_SEC           = 1800  # 30 min wait for OTP before moving to next account
+
+# Pause when ALL 4 slots hit SEARCH_LIMIT_REACHED in the same cycle
+ALL_SLOTS_LIMIT_PAUSE_SEC = 900  # 15 min
 
 # ===================================================================
 # RANDOM INTER-SEARCH DELAY (seconds)
@@ -58,6 +61,7 @@ SEARCH_DELAY_MAX = 35
 # 2CAPTCHA
 # ===================================================================
 CAPTCHA_API_KEY  = os.getenv("CAPTCHA_API_KEY", "")
+# Fallback site key — used when live extraction from the page fails
 CAPTCHA_SITE_KEY = "6LcguussAAAAAJSH4sc2q8R_DnOSO-5qUXfLWjoE"
 
 # ===================================================================

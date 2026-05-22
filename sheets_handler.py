@@ -87,7 +87,7 @@ def get_start_number() -> int:
         val = ws.acell("A2").value
         if val and str(val).strip().isdigit():
             # number = int(str(val).strip())
-            number = 1525194
+            number = 1525263
             print(f"   [SHEETS] Start number: {number}")
             return number
         print(f"   [SHEETS] Start Number cell A2 empty/invalid: '{val}'")
