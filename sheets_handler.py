@@ -1,21 +1,30 @@
 """
 sheets_handler.py
 -----------------
-All Google Sheets read/write operations with auto-reconnect on idle timeout.
+All Google Sheets operations with auto-reconnect on idle-timeout.
 
-Tabs:
-  Found        -> Report Number # | DOI
-  Not Found    -> Report Number   | Date Search
-  Errors       -> Report Number # | Date Search | Error
-  Start Number -> A2=start number, B2=OTP input
+Config tab layout (column A = label, column B = value):
+  B1  Account1 Username
+  B2  Account1 Password
+  B3  Account2 Username
+  B4  Account2 Password
+  B5  Account3 Username
+  B6  Account3 Password
+  B7  Target
+  B8  OTP Timeout (min)
+  B9  Alert Email
+  B10 Alert Email Password
+  B11 Control  (pause / stop / restart — cleared after reading)
 """
 import time
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+
 from config import (
-    SPREADSHEET_ID, CREDENTIALS_FILE,
-    SHEET_FOUND, SHEET_NOT_FOUND, SHEET_ERRORS, SHEET_START,
+    SPREADSHEET_ID, CREDENTIALS_FILE, CFG_ROW,
+    SHEET_FOUND, SHEET_NOT_FOUND, SHEET_ERRORS,
+    SHEET_START, SHEET_CONFIG,
 )
 
 SCOPES = [
@@ -25,9 +34,12 @@ SCOPES = [
 
 _MAX_RETRIES   = 3
 _RETRY_BACKOFF = [5, 15, 30]
+_spreadsheet   = None
 
-_spreadsheet = None
 
+# -------------------------------------------------------------------
+# Connection
+# -------------------------------------------------------------------
 
 def _reset_connection():
     global _spreadsheet
@@ -79,21 +91,93 @@ def _get_or_create_worksheet(name: str, headers: list):
         return ws
 
 
-# -- PUBLIC API ------------------------------------------------------------
+# -------------------------------------------------------------------
+# CONFIG TAB — read all settings at once
+# -------------------------------------------------------------------
+
+def load_config() -> dict:
+    """
+    Read all values from the Config tab and return a dict.
+    Called once at startup and again on restart.
+    Falls back to empty strings for missing values.
+    """
+    def _do():
+        ws     = _get_spreadsheet().worksheet(SHEET_CONFIG)
+        result = {}
+        for key, cell in CFG_ROW.items():
+            try:
+                val = ws.acell(cell).value
+                result[key] = str(val).strip() if val else ""
+            except Exception:
+                result[key] = ""
+        return result
+
+    try:
+        cfg = _with_retry(_do)
+        # Parse accounts list
+        accounts = []
+        for i in range(1, 4):
+            u = cfg.get(f"account{i}_user", "").strip()
+            p = cfg.get(f"account{i}_pass", "").strip()
+            if u:
+                accounts.append({"username": u, "password": p})
+        cfg["accounts"] = accounts
+        cfg["target"]   = int(cfg.get("target", "100") or "100")
+        cfg["otp_timeout_min"] = int(cfg.get("otp_timeout_min", "60") or "60")
+        print(f"   [SHEETS] Config loaded: {len(accounts)} accounts, "
+              f"target={cfg['target']}, otp={cfg['otp_timeout_min']}min")
+        return cfg
+    except Exception as e:
+        print(f"   [SHEETS] ERROR loading config: {e}")
+        return {"accounts": [], "target": 100, "otp_timeout_min": 60,
+                "alert_email": "", "alert_password": "", "control": ""}
+
+
+# -------------------------------------------------------------------
+# CONTROL CELL — checked after every search
+# -------------------------------------------------------------------
+
+def check_control() -> str:
+    """
+    Read B11 (Control cell) from Config tab.
+    Returns lowercase value if it's pause/stop/restart, else "".
+    Clears the cell after reading a recognised command.
+    """
+    def _do():
+        ws  = _get_spreadsheet().worksheet(SHEET_CONFIG)
+        val = ws.acell(CFG_ROW["control"]).value
+        if not val:
+            return ""
+        cmd = str(val).strip().lower()
+        if cmd in ("pause", "stop", "restart"):
+            ws.update(CFG_ROW["control"], [[""]])   # clear immediately
+            print(f"   [CONTROL] Command received: {cmd.upper()}")
+            return cmd
+        return ""
+
+    try:
+        return _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR reading control cell: {e}")
+        return ""
+
+
+# -------------------------------------------------------------------
+# START NUMBER / OTP
+# -------------------------------------------------------------------
 
 def get_start_number() -> int:
     def _do():
         ws  = _get_spreadsheet().worksheet(SHEET_START)
         val = ws.acell("A2").value
         if val and str(val).strip().isdigit():
-            # number = int(str(val).strip())
-            number = 1525263
-            print(f"   [SHEETS] Start number: {number}")
-            return number
-        print(f"   [SHEETS] Start Number cell A2 empty/invalid: '{val}'")
+            return int(str(val).strip())
         return 0
     try:
-        return _with_retry(_do)
+        num = _with_retry(_do)
+        if num:
+            print(f"   [SHEETS] Start number: {num}")
+        return num
     except Exception as e:
         print(f"   [SHEETS] ERROR get_start_number: {e}")
         return 0
@@ -123,6 +207,10 @@ def clear_otp_from_sheet():
     except Exception as e:
         print(f"   [SHEETS] ERROR clear_otp: {e}")
 
+
+# -------------------------------------------------------------------
+# WRITE RESULTS
+# -------------------------------------------------------------------
 
 def save_found(report_number: str, date_of_incident: str):
     def _do():
