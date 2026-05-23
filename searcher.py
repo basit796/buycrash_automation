@@ -338,7 +338,7 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int) -> di
 
     print(f"\n   [SLOT {slot_idx}] Logging in as {username}...")
 
-    with SB(uc=True, test=False, locale="en", headless=True) as sb:
+    with SB(uc=True, binary_location="/usr/bin/chromium", headless=True) as sb:
         sb.activate_cdp_mode(BASE_URL + "/ui/home")
         sb.sleep(4)
 
@@ -430,7 +430,7 @@ def _get_no_login_session() -> requests.Session:
     cookie_dict = {}
     user_agent  = None
 
-    with SB(uc=True, test=False, locale="en", headless=True) as sb:
+    with SB(uc=True, binary_location="/usr/bin/chromium", headless=True) as sb:
         print("   [SLOT 3 / NO-LOGIN] Navigating to search page...")
         sb.activate_cdp_mode(SEARCH_PAGE_URL)
         sb.sleep(5)
