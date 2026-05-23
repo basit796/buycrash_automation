@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Secrets — never bake into image
+.env
+google_credentials.json
+session_cookies_slot*.pkl
+
+# Runtime files — mount these as volumes
+progress.txt
+crash_reports.xlsx
+*.log
+
+# Dev/git
+.git/
+.gitignore
+*.md
+README_AWS.txt
+
+# Lambda (not needed in container)
+lambda_trigger.py
