@@ -157,6 +157,93 @@ def restart(x_api_key: str = Header(default="")):
     return {"message": "Was idle — started fresh", "pid": _state["pid"]}
 
 
+# --- Account Creator Background Thread & State ---
+
+_creator_state = {
+    "status": "idle",
+    "created_accounts": [],
+    "logs": []
+}
+_creator_lock = threading.Lock()
+
+
+def _run_creator(count: int, proxy: Optional[str]):
+    global _creator_state
+    with _creator_lock:
+        _creator_state["status"] = "running"
+        _creator_state["logs"] = ["Starting account creator..."]
+        _creator_state["created_accounts"] = []
+    
+    def log(msg):
+        print(msg)
+        with _creator_lock:
+            _creator_state["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            if len(_creator_state["logs"]) > 100:
+                _creator_state["logs"].pop(0)
+
+    try:
+        import account_creator
+        import time
+        log(f"Configured to create {count} accounts.")
+        if proxy:
+            log(f"Using proxy: {proxy.split('@')[-1] if '@' in proxy else proxy}")
+        else:
+            log("No proxy configured — direct connection.")
+
+        for i in range(1, count + 1):
+            log(f"Starting creation of account {i} of {count}...")
+            try:
+                res = account_creator.create_one_account(proxy=proxy)
+                with _creator_lock:
+                    _creator_state["created_accounts"].append(res)
+                log(f"Successfully created and logged account {i}: {res['user_id']}")
+            except Exception as e:
+                log(f"Failed to create account {i}: {e}")
+            
+            if i < count:
+                log("Sleeping 10 seconds before starting next account...")
+                time.sleep(10)
+                
+        with _creator_lock:
+            _creator_state["status"] = "success"
+    except Exception as e:
+        log(f"Fatal error in account creator thread: {e}")
+        with _creator_lock:
+            _creator_state["status"] = "error"
+
+
+@app.post("/create-accounts", tags=["Account Creator"], summary="Create multiple BuyCrash accounts automatically")
+def create_accounts(count: int = 6, x_api_key: str = Header(default="")):
+    _auth(x_api_key)
+    global _creator_state
+    
+    # 1. Check if scraper script is running
+    with _lock:
+        if _state["status"] == "running":
+            raise HTTPException(status_code=400, detail="scraper script is currently running; stop it first to prevent conflicts.")
+
+    # 2. Check if another account creation is already running
+    with _creator_lock:
+        if _creator_state["status"] == "running":
+            raise HTTPException(status_code=400, detail="An account creation job is already running.")
+
+    # 3. Load proxy from sheets config B24
+    import sheets_handler
+    cfg = sheets_handler.load_config()
+    proxy = cfg.get("residential_proxy")
+
+    # 4. Trigger creation in background thread
+    threading.Thread(target=_run_creator, args=(count, proxy), daemon=True).start()
+    return {"message": f"Started creation of {count} accounts in background. Call GET /create-accounts/status to monitor."}
+
+
+@app.get("/create-accounts/status", tags=["Account Creator"], summary="Check status of background account creation")
+def create_accounts_status(x_api_key: str = Header(default="")):
+    _auth(x_api_key)
+    with _creator_lock:
+        return dict(_creator_state)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("API_PORT", "5000"))

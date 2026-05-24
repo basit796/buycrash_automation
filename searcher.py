@@ -638,7 +638,15 @@ def _search_via_api(api_session: requests.Session,
             raise Exception("SEARCH_LIMIT_REACHED")
 
         if code == "VALIDATION_ERROR":
-            print(f"   [DEBUG] Validation: {data.get('validationMessages', [])}")
+            msgs = data.get("validationMessages", [])
+            print(f"   [DEBUG] Validation: {msgs}")
+            # If the captcha token itself was rejected, raise so the retry
+            # loop re-solves a fresh token instead of marking as NOT FOUND
+            bad_fields = [m.get("fieldName", "") for m in msgs]
+            if "captchaToken" in bad_fields:
+                raise Exception("CAPTCHA_INVALID — server rejected token, re-solving")
+            # Other field validation errors (wrong report format, etc.) are
+            # treated as not-found for this report
             return None
 
         if code == "OK":
@@ -665,6 +673,7 @@ def _search_via_api(api_session: requests.Session,
     else:
         print(f"   [DEBUG] Unexpected HTTP {resp.status_code}")
         return None
+
 
 
 # -------------------------------------------------------------------

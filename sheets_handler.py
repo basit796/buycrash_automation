@@ -283,6 +283,24 @@ def save_error(report_number: str, error_message: str):
         print(f"   [SHEETS] ERROR save_error: {e}")
 
 
+def save_created_account(email: str, email_pass: str, portal_user: str, portal_pass: str, address: str, first_name: str, last_name: str):
+    def _do():
+        ws = _get_or_create_worksheet("Credentials", [
+            "Account Date", "Email Username", "Email Password",
+            "Portal Username", "Portal Password", "Billing Address",
+            "First Name", "Last Name"
+        ])
+        date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.insert_row([
+            date_str, email, email_pass, portal_user, portal_pass, address, first_name, last_name
+        ], 2, value_input_option="USER_ENTERED")
+        print(f"   [SHEETS] Saved created account: {portal_user}")
+    try:
+        _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR save_created_account: {e}")
+
+
 def test_connection() -> bool:
     def _do():
         sp     = _get_spreadsheet()
