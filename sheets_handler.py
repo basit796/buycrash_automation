@@ -133,15 +133,23 @@ def load_config() -> dict:
                 proxies.append(p)
         cfg["proxies"] = proxies
 
+        # Mail.tm tokens — index 0 = account 1, index 1 = account 2, etc.
+        mailtm_tokens = []
+        for i in range(1, 4):
+            t = cfg.get(f"mailtm_token_{i}", "").strip()
+            mailtm_tokens.append(t)   # empty string if not configured
+        cfg["mailtm_tokens"] = mailtm_tokens
+
         print(f"   [SHEETS] Config loaded: {len(accounts)} accounts, "
               f"target={cfg['target']}, otp={cfg['otp_timeout_min']}min, "
-              f"proxies={len(proxies)}")
+              f"proxies={len(proxies)}, "
+              f"mailtm={sum(1 for t in mailtm_tokens if t)} tokens")
         return cfg
     except Exception as e:
         print(f"   [SHEETS] ERROR loading config: {e}")
         return {"accounts": [], "target": 100, "otp_timeout_min": 60,
                 "alert_email": "", "alert_password": "", "control": "",
-                "proxies": []}
+                "proxies": [], "mailtm_tokens": ["", "", ""]}
 
 
 # -------------------------------------------------------------------

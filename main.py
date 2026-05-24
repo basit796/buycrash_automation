@@ -223,8 +223,10 @@ def _run(cfg: dict, start_report: int) -> str:
 
             # Acquire session
             try:
-                api_session = get_session_for_slot(slot_idx, accounts,
-                                                   otp_timeout_min, current_proxy)
+                api_session = get_session_for_slot(
+                    slot_idx, accounts, otp_timeout_min,
+                    current_proxy, cfg.get("mailtm_tokens", [])
+                )
             except Exception as e:
                 err = str(e)
                 if "OTP_TIMEOUT" in err:

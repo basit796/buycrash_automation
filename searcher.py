@@ -217,16 +217,24 @@ def _extract_cookies(sb) -> dict:
 # OTP HANDLER
 # -------------------------------------------------------------------
 
-def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> bool:
-    import sheets_handler
-    import mailer
-
+def _handle_otp(sb, slot_idx: int, account_label: str,
+                otp_timeout_min: int, mailtm_token: str = None) -> bool:
+    """
+    Complete OTP flow automatically via Mail.tm API when token available,
+    falls back to manual Sheet B2 polling if not configured.
+    Returns True if OTP completed, False if timed out.
+    """
     wait_sec = otp_timeout_min * 60
+
     print("=" * 60)
     print(f"  OTP REQUIRED — Slot {slot_idx} ({account_label})")
-    print(f"  Waiting up to {otp_timeout_min} min. Paste OTP into Sheet B2")
+    if mailtm_token:
+        print(f"  Auto-fetching OTP via Mail.tm API...")
+    else:
+        print(f"  Paste OTP into Google Sheet B2 within {otp_timeout_min} min")
     print("=" * 60)
 
+    # Click Email radio
     for sel in ["input[type='radio'][value*='mail']", "input[type='radio']:first-of-type"]:
         try:
             sb.cdp.click(sel); break
@@ -234,36 +242,65 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
             continue
     sb.sleep(1)
 
-    for sel in ["button:contains('Send Code')", "button:contains('Continue')", "button[type='submit']"]:
+    # Snapshot inbox BEFORE clicking Send Code
+    seen_ids = set()
+    if mailtm_token:
+        from mailreader import get_inbox_snapshot
+        seen_ids = get_inbox_snapshot(mailtm_token)
+        print(f"   [OTP] Inbox snapshot: {len(seen_ids)} existing messages")
+
+    # Click Send Code
+    for sel in ["button:contains('Send Code')", "button:contains('Continue')",
+                "button[type='submit']"]:
         try:
             sb.cdp.click(sel)
-            print("   Clicked Send Code"); break
+            print("   [OTP] Clicked Send Code"); break
         except Exception:
             continue
     sb.sleep(2)
 
-    elapsed  = 0
-    interval = 30
     otp_code = None
 
-    while elapsed < wait_sec:
-        sb.sleep(interval)
-        elapsed   += interval
-        print(f"   [OTP] {elapsed}s elapsed / {wait_sec}s max")
-        try:
-            code = sheets_handler.get_otp_from_sheet()
-            if code:
-                otp_code = str(code).strip()
-                print(f"   [OTP] Received: {otp_code}")
-                sheets_handler.clear_otp_from_sheet()
-                break
-        except Exception as e:
-            print(f"   [OTP] Sheet poll error: {e}")
+    # Method 1: Mail.tm API (automatic, fast)
+    if mailtm_token:
+        from mailreader import wait_for_otp
+        print(f"   [OTP] Fetching via Mail.tm API (max 2 min)...")
+        otp_code = wait_for_otp(
+            token         = mailtm_token,
+            max_wait_sec  = min(wait_sec, 120),
+            poll_interval = 8,
+            seen_ids      = seen_ids,
+        )
+        if otp_code:
+            print(f"   [OTP] Auto-received: {otp_code}")
+        else:
+            print(f"   [OTP] Mail.tm timed out — falling back to Sheet B2")
+
+    # Method 2: fallback — poll Google Sheet B2
+    if not otp_code:
+        import sheets_handler
+        print(f"   [OTP] Polling Sheet B2 (up to {otp_timeout_min} min)...")
+        elapsed  = 0
+        interval = 30
+        while elapsed < wait_sec:
+            sb.sleep(interval)
+            elapsed += interval
+            print(f"   [OTP] Waiting... {elapsed}s / {wait_sec}s")
+            try:
+                code = sheets_handler.get_otp_from_sheet()
+                if code:
+                    otp_code = str(code).strip()
+                    print(f"   [OTP] Received from Sheet: {otp_code}")
+                    sheets_handler.clear_otp_from_sheet()
+                    break
+            except Exception as e:
+                print(f"   [OTP] Sheet poll error: {e}")
 
     if not otp_code:
-        print(f"   [OTP] Timeout for slot {slot_idx}")
+        print(f"   [OTP] Timeout — no OTP for slot {slot_idx}")
         return False
 
+    # Wait for passcode page
     for _ in range(15):
         sb.sleep(1)
         try:
@@ -275,7 +312,6 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
 
     sb.sleep(1)
     filled = False
-
     for sel in [
         "input[name*='passcode']", "input[id*='passcode']",
         "input[name*='Passcode']", "input[id*='Passcode']",
@@ -283,8 +319,7 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
         "input[placeholder*='asscode']",
     ]:
         try:
-            sb.cdp.click(sel)
-            sb.sleep(0.2)
+            sb.cdp.click(sel); sb.sleep(0.2)
             sb.cdp.evaluate(f"document.querySelector('{sel}').value = ''")
             sb.cdp.type(sel, otp_code)
             filled = True; break
@@ -325,7 +360,7 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
             continue
 
     sb.sleep(4)
-    print("   [OTP] Submitted")
+    print("   [OTP] Submitted successfully")
     return True
 
 
@@ -334,7 +369,7 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
 # -------------------------------------------------------------------
 
 def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
-                       proxy: str = None) -> dict:
+                       proxy: str = None, mailtm_token: str = None) -> dict:
     username      = account["username"]
     password      = account["password"]
     account_label = f"Account {slot_idx + 1}: {username}"
@@ -411,7 +446,8 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
         url = sb.cdp.get_current_url()
         print(f"   URL after login: {url}")
         if "otp" in url.lower():
-            otp_ok = _handle_otp(sb, slot_idx, account_label, otp_timeout_min)
+            otp_ok = _handle_otp(sb, slot_idx, account_label,
+                                 otp_timeout_min, mailtm_token)
             if not otp_ok:
                 raise Exception("OTP_TIMEOUT")
 
@@ -486,12 +522,13 @@ def _get_no_login_session(proxy: str = None) -> requests.Session:
 
 def get_session_for_slot(slot_idx: int, accounts: list,
                          otp_timeout_min: int,
-                         proxy: str = None) -> requests.Session:
+                         proxy: str = None,
+                         mailtm_tokens: list = None) -> requests.Session:
     """
     accounts        : list of {"username":..,"password":..} from Config sheet
     otp_timeout_min : from Config sheet
-    proxy           : optional proxy URL — e.g. http://user:pass@host:port
-                      Pass None to use direct connection (no proxy).
+    proxy           : optional proxy URL
+    mailtm_tokens   : list of Mail.tm tokens indexed by slot (slot 0 = index 0)
     """
     if slot_idx == NO_LOGIN_SLOT:
         return _get_no_login_session(proxy)
@@ -499,7 +536,10 @@ def get_session_for_slot(slot_idx: int, accounts: list,
     if slot_idx >= len(accounts):
         raise Exception(f"LOGIN_FAILED: no account configured for slot {slot_idx}")
 
-    account = accounts[slot_idx]
+    account       = accounts[slot_idx]
+    mailtm_token  = (mailtm_tokens[slot_idx]
+                     if mailtm_tokens and slot_idx < len(mailtm_tokens)
+                     else None) or None
 
     # When proxy changes, force fresh login (cached cookies are IP-bound)
     saved = _load_cookies(slot_idx)
@@ -515,7 +555,8 @@ def get_session_for_slot(slot_idx: int, accounts: list,
         print(f"   [SLOT {slot_idx}] Session expired or proxy changed — re-logging in")
         _delete_cookies(slot_idx)
 
-    cookie_dict = _login_via_browser(slot_idx, account, otp_timeout_min, proxy)
+    cookie_dict = _login_via_browser(slot_idx, account, otp_timeout_min,
+                                     proxy, mailtm_token)
     if not cookie_dict:
         raise Exception(f"LOGIN_FAILED for slot {slot_idx}")
 

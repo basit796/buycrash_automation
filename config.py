@@ -113,6 +113,10 @@ CFG_ROW = {
     "proxy_5":         "B16",
     "proxy_6":         "B17",
     "proxy_7":         "B18",
+    # Mail.tm tokens — one per site account (index matches account number)
+    "mailtm_token_1":  "B19",
+    "mailtm_token_2":  "B20",
+    "mailtm_token_3":  "B21",
 }
 
 # ===================================================================
