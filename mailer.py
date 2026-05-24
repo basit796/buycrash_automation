@@ -44,20 +44,24 @@ def _send(to_email: str, app_password: str, subject: str, body: str):
 # PUBLIC ALERT FUNCTIONS
 # -------------------------------------------------------------------
 
-def send_otp_required(cfg: dict, slot_idx: int, account_label: str):
-    """Alert: OTP screen appeared for an account."""
+def send_otp_required(cfg: dict, slot_idx: int, account_label: str,
+                      username: str = "", password: str = ""):
+    """Alert: OTP screen appeared for an account — includes credentials."""
     subject = f"[BuyCrash] OTP Required — {account_label}"
     body = (
         f"OTP Required\n"
         f"{'='*40}\n"
-        f"Time      : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Slot      : {slot_idx}\n"
-        f"Account   : {account_label}\n\n"
+        f"Time           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Slot           : {slot_idx}\n"
+        f"Account        : {account_label}\n"
+        f"Username       : {username}\n"
+        f"Password       : {password}\n\n"
         f"Action needed:\n"
-        f"  1. Check the email inbox for {account_label}\n"
-        f"  2. Copy the OTP code\n"
-        f"  3. Paste it into the Google Sheet → 'Start Number' tab → cell B2\n\n"
-        f"The script will wait {cfg.get('otp_timeout_min', 60)} minutes before skipping this account.\n"
+        f"  1. Log into the account above\n"
+        f"  2. Check inbox for the OTP code\n"
+        f"  3. Paste it into Google Sheet → 'Start Number' tab → cell B2\n\n"
+        f"The script will wait {cfg.get('otp_timeout_min', 60)} minutes "
+        f"before skipping this account.\n"
     )
     _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
 
@@ -138,6 +142,52 @@ def send_success(cfg: dict, found_total: int, target: int,
         f"Results saved to:\n"
         f"  - Google Sheets (Found / Not Found / Errors tabs)\n"
         f"  - Local file: crash_reports.xlsx\n"
+    )
+    _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
+
+
+def send_ip_rotated(cfg: dict, old_proxy_idx: int, new_proxy_idx: int,
+                    new_proxy: str, rotation_num: int, max_rotations: int,
+                    report_num: int):
+    """Alert: IP rotated after all slots hit search limit."""
+    display_proxy = new_proxy
+    try:
+        if "@" in new_proxy:
+            scheme_creds, rest = new_proxy.split("@", 1)
+            scheme, creds      = scheme_creds.split("//", 1)
+            user               = creds.split(":")[0]
+            display_proxy      = f"{scheme}//{user}:****@{rest}"
+    except Exception:
+        display_proxy = "****"
+
+    subject = f"[BuyCrash] IP Rotated ({rotation_num}/{max_rotations})"
+    body = (
+        f"IP rotated — all 4 slots hit search limit\n"
+        f"{'='*40}\n"
+        f"Time           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Rotation       : {rotation_num} of {max_rotations}\n"
+        f"New proxy      : {display_proxy}\n"
+        f"Resume from    : report #{report_num}\n"
+    )
+    _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
+
+
+def send_proxies_exhausted(cfg: dict, found_total: int, searches_done: int,
+                           elapsed_sec: float, report_num: int,
+                           fallback_wait_min: int):
+    """Alert: all proxies exhausted, falling back to timed pause."""
+    subject = "[BuyCrash] All Proxies Exhausted — Waiting"
+    body = (
+        f"All proxy IPs used and all hit search limits.\n"
+        f"Falling back to {fallback_wait_min}-min wait before retrying.\n"
+        f"{'='*40}\n"
+        f"Time           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Resume from    : report #{report_num}\n\n"
+        f"Progress\n"
+        f"{'='*40}\n"
+        f"Reports found  : {found_total}\n"
+        f"Total searches : {searches_done}\n"
+        f"Time elapsed   : {_fmt_elapsed(elapsed_sec)}\n"
     )
     _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
 

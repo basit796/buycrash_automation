@@ -47,9 +47,10 @@ NO_LOGIN_SLOT             = 3
 BATCH_SIZE                = 15     # reports per slot
 INTER_BATCH_PAUSE_SEC     = 180    # 3 min between slots
 LIMIT_PAUSE_SEC           = 300    # 5 min on SEARCH_LIMIT_REACHED per slot
-ALL_SLOTS_LIMIT_PAUSE_SEC = 900    # 15 min when all 4 slots hit limit
+ALL_SLOTS_LIMIT_PAUSE_SEC = 900    # 15 min when all 4 slots hit limit (no proxy)
 RESTART_PAUSE_SEC         = 120    # 2 min pause on "restart" control command
 CONSECUTIVE_ERROR_LIMIT   = 20     # stop script after N back-to-back errors
+MAX_PROXY_ROTATIONS       = 7      # max IP rotations before falling back to 15-min pause
 
 # ===================================================================
 # RANDOM INTER-SEARCH DELAY (seconds)
@@ -80,6 +81,18 @@ SHEET_CONFIG     = "Config"
 #   Row 9  Alert Email
 #   Row 10 Alert Email Password
 #   Row 11 Control
+#   Row 12 Proxy 1   (format: http://user:pass@host:port  OR  leave blank)
+#   Row 13 Proxy 2
+#   Row 14 Proxy 3
+#   Row 15 Proxy 4
+#   Row 16 Proxy 5
+#   Row 17 Proxy 6
+#   Row 18 Proxy 7
+#
+# IPRoyal residential proxy format:
+#   http://username:password@geo.iproyal.com:12321
+#   Add ?country=us to force US IPs:
+#   http://username:password@geo.iproyal.com:12321?country=us
 # ===================================================================
 CFG_ROW = {
     "account1_user":   "B1",
@@ -93,6 +106,13 @@ CFG_ROW = {
     "alert_email":     "B9",
     "alert_password":  "B10",
     "control":         "B11",
+    "proxy_1":         "B12",
+    "proxy_2":         "B13",
+    "proxy_3":         "B14",
+    "proxy_4":         "B15",
+    "proxy_5":         "B16",
+    "proxy_6":         "B17",
+    "proxy_7":         "B18",
 }
 
 # ===================================================================

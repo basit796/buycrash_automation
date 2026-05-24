@@ -124,13 +124,24 @@ def load_config() -> dict:
         cfg["accounts"] = accounts
         cfg["target"]   = int(cfg.get("target", "100") or "100")
         cfg["otp_timeout_min"] = int(cfg.get("otp_timeout_min", "60") or "60")
+
+        # Build proxy list — skip empty rows
+        proxies = []
+        for i in range(1, 8):
+            p = cfg.get(f"proxy_{i}", "").strip()
+            if p:
+                proxies.append(p)
+        cfg["proxies"] = proxies
+
         print(f"   [SHEETS] Config loaded: {len(accounts)} accounts, "
-              f"target={cfg['target']}, otp={cfg['otp_timeout_min']}min")
+              f"target={cfg['target']}, otp={cfg['otp_timeout_min']}min, "
+              f"proxies={len(proxies)}")
         return cfg
     except Exception as e:
         print(f"   [SHEETS] ERROR loading config: {e}")
         return {"accounts": [], "target": 100, "otp_timeout_min": 60,
-                "alert_email": "", "alert_password": "", "control": ""}
+                "alert_email": "", "alert_password": "", "control": "",
+                "proxies": []}
 
 
 # -------------------------------------------------------------------

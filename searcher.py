@@ -163,7 +163,8 @@ def _test_session(api_session: requests.Session, slot_idx: int) -> bool:
 # BUILD requests.Session
 # -------------------------------------------------------------------
 
-def _build_api_session(cookie_dict: dict, user_agent: str = None) -> requests.Session:
+def _build_api_session(cookie_dict: dict, user_agent: str = None,
+                       proxy: str = None) -> requests.Session:
     session = requests.Session()
     for name, value in cookie_dict.items():
         session.cookies.set(name, value, domain="buycrash.lexisnexisrisk.com")
@@ -184,6 +185,9 @@ def _build_api_session(cookie_dict: dict, user_agent: str = None) -> requests.Se
         "lnbc-client-version": "1.0.145",
         "x-xsrf-token":        xsrf,
     })
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+        print(f"   Session proxy set: {proxy.split('@')[-1] if '@' in proxy else proxy}")
     if xsrf:
         print(f"   API session built — XSRF: {xsrf[:20]}...")
     else:
@@ -329,16 +333,32 @@ def _handle_otp(sb, slot_idx: int, account_label: str, otp_timeout_min: int) -> 
 # LOGIN VIA BROWSER
 # -------------------------------------------------------------------
 
-def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int) -> dict:
+def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
+                       proxy: str = None) -> dict:
     username      = account["username"]
     password      = account["password"]
     account_label = f"Account {slot_idx + 1}: {username}"
     cookie_dict   = {}
     user_agent    = None
 
-    print(f"\n   [SLOT {slot_idx}] Logging in as {username}...")
+    print(f"\n   [SLOT {slot_idx}] Logging in as {username}"
+          + (f" via proxy {proxy.split('@')[-1]}" if proxy and "@" in proxy else "")
+          + "...")
 
-    with SB(uc=True, binary_location="/usr/bin/chromium", headless=True) as sb:
+    # Build SB proxy arg — SB accepts "host:port:user:pass" or standard formats
+    sb_proxy = None
+    if proxy:
+        try:
+            # proxy format: http://user:pass@host:port
+            rest        = proxy.split("//")[-1]          # user:pass@host:port
+            creds, host = rest.rsplit("@", 1)
+            user, pw    = creds.split(":", 1)
+            sb_proxy    = f"{host}:{user}:{pw}"          # SB format
+        except Exception:
+            sb_proxy = None   # can't parse — skip proxy for browser
+
+    with SB(uc=True, test=False, locale="en", headless=True,
+            proxy=sb_proxy) as sb:
         sb.activate_cdp_mode(BASE_URL + "/ui/home")
         sb.sleep(4)
 
@@ -426,12 +446,24 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int) -> di
 # NO-LOGIN SESSION
 # -------------------------------------------------------------------
 
-def _get_no_login_session() -> requests.Session:
+def _get_no_login_session(proxy: str = None) -> requests.Session:
     cookie_dict = {}
     user_agent  = None
 
-    with SB(uc=True, binary_location="/usr/bin/chromium", headless=True) as sb:
-        print("   [SLOT 3 / NO-LOGIN] Navigating to search page...")
+    sb_proxy = None
+    if proxy:
+        try:
+            rest        = proxy.split("//")[-1]
+            creds, host = rest.rsplit("@", 1)
+            user, pw    = creds.split(":", 1)
+            sb_proxy    = f"{host}:{user}:{pw}"
+        except Exception:
+            sb_proxy = None
+
+    with SB(uc=True, test=False, locale="en", headless=True,
+            proxy=sb_proxy) as sb:
+        print("   [SLOT 3 / NO-LOGIN] Navigating to search page"
+              + (f" via {proxy.split('@')[-1]}" if proxy and "@" in proxy else "") + "...")
         sb.activate_cdp_mode(SEARCH_PAGE_URL)
         sb.sleep(5)
         print(f"   URL: {sb.cdp.get_current_url()}")
@@ -445,7 +477,7 @@ def _get_no_login_session() -> requests.Session:
     if not cookie_dict:
         raise Exception("NO-LOGIN: Could not obtain cookies")
 
-    return _build_api_session(cookie_dict, user_agent)
+    return _build_api_session(cookie_dict, user_agent, proxy)
 
 
 # -------------------------------------------------------------------
@@ -453,37 +485,45 @@ def _get_no_login_session() -> requests.Session:
 # -------------------------------------------------------------------
 
 def get_session_for_slot(slot_idx: int, accounts: list,
-                         otp_timeout_min: int) -> requests.Session:
+                         otp_timeout_min: int,
+                         proxy: str = None) -> requests.Session:
     """
-    accounts   : list of {"username":..,"password":..} loaded from Config sheet
+    accounts        : list of {"username":..,"password":..} from Config sheet
     otp_timeout_min : from Config sheet
+    proxy           : optional proxy URL — e.g. http://user:pass@host:port
+                      Pass None to use direct connection (no proxy).
     """
     if slot_idx == NO_LOGIN_SLOT:
-        return _get_no_login_session()
+        return _get_no_login_session(proxy)
 
     if slot_idx >= len(accounts):
         raise Exception(f"LOGIN_FAILED: no account configured for slot {slot_idx}")
 
     account = accounts[slot_idx]
 
+    # When proxy changes, force fresh login (cached cookies are IP-bound)
     saved = _load_cookies(slot_idx)
     if saved:
-        cookie_dict = saved.get("cookies", {})
-        ua          = saved.get("user_agent")
-        if cookie_dict:
-            api_session = _build_api_session(cookie_dict, ua)
+        cookie_dict      = saved.get("cookies", {})
+        ua               = saved.get("user_agent")
+        saved_proxy      = saved.get("proxy")
+        proxy_unchanged  = (saved_proxy == proxy)
+        if cookie_dict and proxy_unchanged:
+            api_session = _build_api_session(cookie_dict, ua, proxy)
             if _test_session(api_session, slot_idx):
                 return api_session
-            print(f"   [SLOT {slot_idx}] Saved session expired — re-logging in")
-            _delete_cookies(slot_idx)
+        print(f"   [SLOT {slot_idx}] Session expired or proxy changed — re-logging in")
+        _delete_cookies(slot_idx)
 
-    cookie_dict = _login_via_browser(slot_idx, account, otp_timeout_min)
+    cookie_dict = _login_via_browser(slot_idx, account, otp_timeout_min, proxy)
     if not cookie_dict:
         raise Exception(f"LOGIN_FAILED for slot {slot_idx}")
 
     saved = _load_cookies(slot_idx)
     ua    = saved.get("user_agent") if saved else None
-    return _build_api_session(cookie_dict, ua)
+    # Store proxy alongside cookies so we can detect proxy change next run
+    _save_cookies(slot_idx, {"cookies": cookie_dict, "user_agent": ua, "proxy": proxy})
+    return _build_api_session(cookie_dict, ua, proxy)
 
 
 # -------------------------------------------------------------------
