@@ -192,7 +192,8 @@ def _run(cfg: dict, start_report: int) -> str:
         print(f"  CYCLE #{cycle_num:03d}  —  cursor={cursor}  found={_found_total}/{target}")
         print(f"{'#'*60}")
 
-        last_active_slot = None
+        last_active_slot  = None
+        slots_attempted   = 0   # how many slots actually ran a batch
 
         for slot_idx in range(TOTAL_SLOTS):
 
@@ -234,6 +235,7 @@ def _run(cfg: dict, start_report: int) -> str:
                 continue
 
             # Run batch
+            slots_attempted += 1
             found_in_slot, next_report, status = run_slot_batch(
                 slot_idx           = slot_idx,
                 api_session        = api_session,
@@ -293,9 +295,10 @@ def _run(cfg: dict, start_report: int) -> str:
         if _found_total >= target:
             break
 
-        if limit_count == TOTAL_SLOTS:
+        # All slots that actually ran a batch hit the search limit
+        if slots_attempted > 0 and limit_count >= slots_attempted:
             _handle_all_slots_limit(cfg, cursor)
-            # cursor unchanged — retry from same position
+            # cursor unchanged — retry from same position after 10-min wait
         else:
             current_report = cursor
 

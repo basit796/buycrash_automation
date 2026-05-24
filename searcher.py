@@ -496,7 +496,7 @@ def _get_no_login_session(proxy: str = None) -> requests.Session:
 
     with SB(uc=True, test=False, locale="en", headless=True,
             proxy=sb_proxy) as sb:
-        print("   [SLOT 3 / NO-LOGIN] Navigating to search page"
+        print(f"   [SLOT {NO_LOGIN_SLOT} / NO-LOGIN] Navigating to search page"
               + (f" via {proxy.split('@')[-1]}" if proxy and "@" in proxy else "") + "...")
         sb.activate_cdp_mode(SEARCH_PAGE_URL)
         sb.sleep(5)
@@ -703,7 +703,7 @@ def run_slot_batch(slot_idx: int,
     MAX_RETRIES       = 3
     found_count       = 0
     consecutive_errs  = 0
-    slot_label        = f"SLOT {slot_idx}" if slot_idx < NO_LOGIN_SLOT else "SLOT 3/NO-LOGIN"
+    slot_label        = f"SLOT {slot_idx}" if slot_idx < NO_LOGIN_SLOT else f"SLOT {NO_LOGIN_SLOT}/NO-LOGIN"
     next_report       = report_numbers[-1] + 1   # default: completed full batch
 
     for i, report_num in enumerate(report_numbers):

@@ -6,10 +6,10 @@ Credentials come from the Config sheet (loaded at runtime).
 
 Gmail setup required:
   1. Enable 2-Step Verification on the Gmail account
-  2. Go to: Google Account → Security → App Passwords
+  2. Go to: Google Account -> Security -> App Passwords
   3. Generate a 16-char app password (e.g. "dxfy esji ylly xbdo")
-  4. Put that in Config sheet B10 (Alert Email Password)
-  5. Put the Gmail address in Config sheet B9 (Alert Email)
+  4. Put that in Config sheet B21 (Alert Email Password)
+  5. Put the Gmail address in Config sheet B20 (Alert Email)
 """
 import smtplib
 import traceback
