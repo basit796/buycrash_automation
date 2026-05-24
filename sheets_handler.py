@@ -123,33 +123,46 @@ def load_config() -> dict:
                 accounts.append({"username": u, "password": p})
         cfg["accounts"] = accounts
         cfg["target"]   = int(cfg.get("target", "100") or "100")
-        cfg["otp_timeout_min"] = int(cfg.get("otp_timeout_min", "60") or "60")
 
-        # Build proxy list — skip empty rows
-        proxies = []
-        for i in range(1, 8):
-            p = cfg.get(f"proxy_{i}", "").strip()
-            if p:
-                proxies.append(p)
-        cfg["proxies"] = proxies
+        # OTP timeout removed from sheet — use hardcoded constant
+        from config import OTP_TIMEOUT_MIN
+        cfg["otp_timeout_min"] = OTP_TIMEOUT_MIN
 
-        # Mail.tm tokens — index 0 = account 1, index 1 = account 2, etc.
+        # Single rotating proxy URL (B12) — empty means direct connection
+        proxy_url     = cfg.get("proxy_url", "").strip()
+        cfg["proxies"] = [proxy_url] if proxy_url else []
+
+        # Mail.tm — email + token pairs, indexed by account (0-based)
         mailtm_tokens = []
+        mailtm_emails = []
         for i in range(1, 4):
-            t = cfg.get(f"mailtm_token_{i}", "").strip()
-            mailtm_tokens.append(t)   # empty string if not configured
+            email = cfg.get(f"mailtm_email_{i}", "").strip()
+            token = cfg.get(f"mailtm_token_{i}", "").strip()
+            mailtm_emails.append(email)
+            mailtm_tokens.append(token)
+        cfg["mailtm_emails"] = mailtm_emails
         cfg["mailtm_tokens"] = mailtm_tokens
 
+        # Map account username → mailtm token for easy lookup in searcher
+        # Key = site username (B1/B3/B5), value = mailtm token
+        cfg["mailtm_by_username"] = {}
+        for i, acc in enumerate(accounts):
+            if i < len(mailtm_tokens) and mailtm_tokens[i]:
+                cfg["mailtm_by_username"][acc["username"]] = mailtm_tokens[i]
+
         print(f"   [SHEETS] Config loaded: {len(accounts)} accounts, "
-              f"target={cfg['target']}, otp={cfg['otp_timeout_min']}min, "
-              f"proxies={len(proxies)}, "
+              f"target={cfg['target']}, "
+              f"proxy={'set' if proxy_url else 'none'}, "
               f"mailtm={sum(1 for t in mailtm_tokens if t)} tokens")
         return cfg
     except Exception as e:
         print(f"   [SHEETS] ERROR loading config: {e}")
-        return {"accounts": [], "target": 100, "otp_timeout_min": 60,
+        from config import OTP_TIMEOUT_MIN
+        return {"accounts": [], "target": 100, "otp_timeout_min": OTP_TIMEOUT_MIN,
                 "alert_email": "", "alert_password": "", "control": "",
-                "proxies": [], "mailtm_tokens": ["", "", ""]}
+                "proxies": [], "mailtm_tokens": ["", "", ""],
+                "mailtm_emails": ["", "", ""],
+                "mailtm_by_username": {}}
 
 
 # -------------------------------------------------------------------

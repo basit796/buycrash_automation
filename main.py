@@ -115,7 +115,7 @@ def _countdown(label: str, seconds: int, interval: int = 30):
 
 def _inter_slot_pause(from_idx: int, to_idx: int, accounts: list):
     print(f"\n   [INTER-SLOT] {INTER_BATCH_PAUSE_SEC//60} min  "
-          f"({_slot_label(from_idx, accounts)} → {_slot_label(to_idx, accounts)})")
+          f"({_slot_label(from_idx, accounts)} -> {_slot_label(to_idx, accounts)})")
     _countdown("INTER-SLOT", INTER_BATCH_PAUSE_SEC)
 
 
@@ -141,7 +141,7 @@ def _handle_all_slots_limit(cfg: dict, cursor: int,
         new_proxy = proxies[next_idx]
         print(f"\n{'!'*60}")
         print(f"  ALL 4 SLOTS HIT SEARCH LIMIT")
-        print(f"  Rotating IP: proxy {proxy_idx} → proxy {next_idx}")
+        print(f"  Rotating IP: proxy {proxy_idx} -> proxy {next_idx}")
         print(f"  New proxy: ...@{new_proxy.split('@')[-1] if '@' in new_proxy else new_proxy}")
         print(f"  Resuming from report #{cursor}")
         print(f"{'!'*60}\n")
@@ -215,7 +215,7 @@ def _run(cfg: dict, start_report: int) -> str:
 
             print(f"\n{'='*60}")
             print(f"  {_slot_label(slot_idx, accounts)}")
-            print(f"  Reports : {batch[0]} → {batch[-1]}  |  Found: {_found_total}/{target}")
+            print(f"  Reports : {batch[0]} -> {batch[-1]}  |  Found: {_found_total}/{target}")
             print(f"{'='*60}")
 
             if last_active_slot is not None:

@@ -365,6 +365,22 @@ def _handle_otp(sb, slot_idx: int, account_label: str,
 
 
 # -------------------------------------------------------------------
+# PROXY PARSING HELPER
+# -------------------------------------------------------------------
+
+def _parse_sb_proxy(proxy: str) -> str:
+    """
+    SeleniumBase proxy support is unreliable with complex passwords
+    (underscores, special chars) that providers like IPRoyal use.
+
+    We intentionally return None here — the browser is only used to
+    extract session cookies. The proxy is applied on the requests.Session
+    for all actual API calls, which is where the rate limit lives.
+    """
+    return None
+
+
+# -------------------------------------------------------------------
 # LOGIN VIA BROWSER
 # -------------------------------------------------------------------
 
@@ -380,17 +396,7 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
           + (f" via proxy {proxy.split('@')[-1]}" if proxy and "@" in proxy else "")
           + "...")
 
-    # Build SB proxy arg — SB accepts "host:port:user:pass" or standard formats
-    sb_proxy = None
-    if proxy:
-        try:
-            # proxy format: http://user:pass@host:port
-            rest        = proxy.split("//")[-1]          # user:pass@host:port
-            creds, host = rest.rsplit("@", 1)
-            user, pw    = creds.split(":", 1)
-            sb_proxy    = f"{host}:{user}:{pw}"          # SB format
-        except Exception:
-            sb_proxy = None   # can't parse — skip proxy for browser
+    sb_proxy = _parse_sb_proxy(proxy)
 
     with SB(uc=True, test=False, locale="en", headless=True,
             proxy=sb_proxy) as sb:
@@ -486,15 +492,7 @@ def _get_no_login_session(proxy: str = None) -> requests.Session:
     cookie_dict = {}
     user_agent  = None
 
-    sb_proxy = None
-    if proxy:
-        try:
-            rest        = proxy.split("//")[-1]
-            creds, host = rest.rsplit("@", 1)
-            user, pw    = creds.split(":", 1)
-            sb_proxy    = f"{host}:{user}:{pw}"
-        except Exception:
-            sb_proxy = None
+    sb_proxy = _parse_sb_proxy(proxy)
 
     with SB(uc=True, test=False, locale="en", headless=True,
             proxy=sb_proxy) as sb:
