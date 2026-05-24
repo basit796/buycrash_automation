@@ -77,7 +77,7 @@ def save_found_report(record: dict):
         cell.alignment = Alignment(horizontal="center")
 
     wb.save(OUTPUT_FILE)
-    print(f"  ✅ Saved FOUND report {record.get('reportNumber')} to Excel")
+    print(f"  [OK] Saved FOUND report {record.get('reportNumber')} to Excel")
 
 
 def save_not_found_report(report_number: str):
@@ -98,7 +98,7 @@ def save_not_found_report(report_number: str):
         cell.alignment = Alignment(horizontal="center")
 
     wb.save(OUTPUT_FILE)
-    print(f"  ❌ Saved NOT FOUND report {report_number} to Excel")
+    print(f"  [--] Saved NOT FOUND report {report_number} to Excel")
 
 
 def get_summary():
@@ -115,4 +115,4 @@ def get_summary():
             found += 1
         elif row[6] == "NOT FOUND":
             not_found += 1
-    print(f"\n📊 Summary: {found} FOUND | {not_found} NOT FOUND | Total checked: {found + not_found}")
+    print(f"\n[SUMMARY] {found} FOUND | {not_found} NOT FOUND | Total checked: {found + not_found}")

@@ -22,9 +22,16 @@ Control cell (Config!B11):
     restart — stop, pause 2 min, reload config, start from beginning
 """
 import argparse
+import sys
 import time
 import traceback
 from datetime import datetime
+
+# ── Force UTF-8 output on Windows (fixes cp1252 UnicodeEncodeError) ──────────
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import sheets_handler
 import mailer
@@ -32,7 +39,7 @@ from config import (
     TOTAL_SLOTS, NO_LOGIN_SLOT, BATCH_SIZE,
     INTER_BATCH_PAUSE_SEC, LIMIT_PAUSE_SEC,
     ALL_SLOTS_LIMIT_PAUSE_SEC, RESTART_PAUSE_SEC,
-    CONSECUTIVE_ERROR_LIMIT, MAX_PROXY_ROTATIONS,
+    CONSECUTIVE_ERROR_LIMIT,
 )
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
@@ -59,7 +66,7 @@ def _elapsed() -> float:
 
 def _slot_label(slot_idx: int, accounts: list) -> str:
     if slot_idx == NO_LOGIN_SLOT:
-        return "Slot 3 / NO-LOGIN"
+        return f"Slot {NO_LOGIN_SLOT} / NO-LOGIN"
     if slot_idx < len(accounts):
         return f"Slot {slot_idx} / Account {slot_idx+1}: {accounts[slot_idx]['username']}"
     return f"Slot {slot_idx} (no account)"
@@ -125,44 +132,24 @@ def _limit_pause(slot_idx: int, report_num: int, accounts: list):
     _countdown("LIMIT", LIMIT_PAUSE_SEC)
 
 
-def _handle_all_slots_limit(cfg: dict, cursor: int,
-                            proxy_idx: int) -> tuple:
+def _handle_all_slots_limit(cfg: dict, cursor: int) -> None:
     """
-    Called when all 4 slots hit SEARCH_LIMIT_REACHED in one cycle.
-    If proxies are available and not exhausted: rotate to next proxy.
-    Otherwise: fall back to ALL_SLOTS_LIMIT_PAUSE_SEC wait.
-    Returns (new_proxy_idx, new_proxy_url_or_None).
+    Called when all slots hit SEARCH_LIMIT_REACHED in one cycle.
+    With a single residential IP there is no rotation — just wait.
     """
-    proxies      = cfg.get("proxies", [])
-    next_idx     = proxy_idx + 1
-    max_rotations = MAX_PROXY_ROTATIONS
-
-    if proxies and next_idx < len(proxies) and next_idx < max_rotations:
-        new_proxy = proxies[next_idx]
-        print(f"\n{'!'*60}")
-        print(f"  ALL 4 SLOTS HIT SEARCH LIMIT")
-        print(f"  Rotating IP: proxy {proxy_idx} -> proxy {next_idx}")
-        print(f"  New proxy: ...@{new_proxy.split('@')[-1] if '@' in new_proxy else new_proxy}")
-        print(f"  Resuming from report #{cursor}")
-        print(f"{'!'*60}\n")
-        mailer.send_ip_rotated(cfg, proxy_idx, next_idx, new_proxy,
-                               next_idx, min(len(proxies), max_rotations), cursor)
-        return next_idx, new_proxy
+    wait_min = ALL_SLOTS_LIMIT_PAUSE_SEC // 60
+    proxy    = cfg.get("residential_proxy")
+    print(f"\n{'!'*60}")
+    print(f"  ALL SLOTS HIT SEARCH LIMIT")
+    if proxy:
+        print(f"  Proxy: {proxy.split('@')[-1] if '@' in proxy else proxy}")
     else:
-        # No more proxies — fall back to timed pause
-        wait_min = ALL_SLOTS_LIMIT_PAUSE_SEC // 60
-        print(f"\n{'!'*60}")
-        print(f"  ALL 4 SLOTS HIT SEARCH LIMIT")
-        if proxies:
-            print(f"  All {len(proxies)} proxies exhausted — falling back to {wait_min}-min wait")
-        else:
-            print(f"  No proxies configured — waiting {wait_min} min")
-        print(f"{'!'*60}")
-        mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
-                                      _elapsed(), cursor, wait_min)
-        _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
-        # Reset proxy index so we cycle through them again after the wait
-        return 0, proxies[0] if proxies else None
+        print(f"  Direct connection (no proxy configured)")
+    print(f"  Waiting {wait_min} min before retrying from #{cursor}")
+    print(f"{'!'*60}")
+    mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
+                                  _elapsed(), cursor, wait_min)
+    _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
 
 
 # -------------------------------------------------------------------
@@ -179,20 +166,21 @@ def _run(cfg: dict, start_report: int) -> str:
     accounts        = cfg["accounts"]
     target          = cfg["target"]
     otp_timeout_min = cfg["otp_timeout_min"]
-    proxies         = cfg.get("proxies", [])
+    proxy           = cfg.get("residential_proxy")   # single residential IP or None
 
     on_found, on_not_found, on_error = _make_callbacks(cfg)
 
     current_report = start_report
     cycle_num      = 0
-    proxy_idx      = 0                            # index into proxies list
-    current_proxy  = proxies[0] if proxies else None   # None = direct connection
 
     print(f"\nTarget  : {target} valid reports")
     print(f"Starting: report #{current_report}")
     print(f"Accounts: {len(accounts)}")
-    print(f"Proxies : {len(proxies)} configured"
-          + (f" — starting with proxy 0" if proxies else " — direct connection"))
+    if proxy:
+        host = proxy.split('@')[-1] if '@' in proxy else proxy
+        print(f"Proxy   : {host} (residential)")
+    else:
+        print(f"Proxy   : none (direct connection)")
     print(f"Alert   : {cfg.get('alert_email') or 'not configured'}\n")
 
     while _found_total < target:
@@ -225,7 +213,7 @@ def _run(cfg: dict, start_report: int) -> str:
             try:
                 api_session = get_session_for_slot(
                     slot_idx, accounts, otp_timeout_min,
-                    current_proxy, cfg.get("mailtm_tokens", [])
+                    proxy, cfg.get("mailtm_tokens", [])
                 )
             except Exception as e:
                 err = str(e)
@@ -253,8 +241,7 @@ def _run(cfg: dict, start_report: int) -> str:
                 found_callback     = on_found,
                 not_found_callback = on_not_found,
                 error_callback     = on_error,
-                found_so_far       = _found_total - found_in_slot
-                                     if False else _found_total,
+                found_so_far       = _found_total,
                 target             = target,
             )
 
@@ -307,10 +294,8 @@ def _run(cfg: dict, start_report: int) -> str:
             break
 
         if limit_count == TOTAL_SLOTS:
-            proxy_idx, current_proxy = _handle_all_slots_limit(
-                cfg, cursor, proxy_idx
-            )
-            # cursor unchanged — retry from same position with new proxy
+            _handle_all_slots_limit(cfg, cursor)
+            # cursor unchanged — retry from same position
         else:
             current_report = cursor
 

@@ -39,8 +39,8 @@ def setup_one_account(account_num: int) -> dict:
     # Create Mail.tm account
     print(f"\nStep 1 — Creating Mail.tm email address...")
     acc = create_account()
-    print(f"\n  ✓ Mail.tm email : {acc['email']}")
-    print(f"  ✓ Mail.tm token : {acc['token']}")
+    print(f"\n  [OK] Mail.tm email : {acc['email']}")
+    print(f"  [OK] Mail.tm token : {acc['token']}")
     print(f"\n  Save these — you'll need them for the Config sheet.")
 
     # Snapshot current inbox so we only catch NEW emails
@@ -64,11 +64,11 @@ def setup_one_account(account_num: int) -> dict:
     )
 
     if otp:
-        print(f"\n  ✓ OTP received: {otp}")
+        print(f"\n  [OK] OTP received: {otp}")
         print(f"  Enter this OTP on the site to complete registration.")
         input(f"\n  Press ENTER after you have completed registration on the site...")
     else:
-        print(f"\n  ✗ No OTP received — check if registration email went to spam")
+        print(f"\n  [--] No OTP received -- check if registration email went to spam")
         print(f"    or try re-sending the verification email on the site.")
 
     return {
@@ -81,15 +81,23 @@ def setup_one_account(account_num: int) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Setup Mail.tm accounts for BuyCrash")
-    parser.add_argument("--accounts", type=int, default=3,
-                        help="Number of accounts to set up (default: 3)")
+    parser.add_argument("--accounts", type=int, default=9,
+                        help="Number of accounts to set up (default: 9)")
     args = parser.parse_args()
 
     print("=" * 55)
-    print("  BuyCrash Account Setup — Mail.tm Helper")
+    print("  BuyCrash Account Setup -- Mail.tm Helper")
     print("=" * 55)
     print(f"\nThis will create {args.accounts} Mail.tm email address(es)")
-    print("and guide you through registering them on the site.\n")
+    print("and guide you through registering them on the site.")
+    print("Cells to fill in Google Sheet Config tab:")
+    for n in range(1, args.accounts + 1):
+        row_user  = 1 + (n - 1) * 2
+        row_email = 26 + (n - 1) * 2 + 1
+        row_token = row_email + 1
+        print(f"  Account {n}: B{row_user}/{row_user+1} (user/pass)  "
+              f"B{row_email}/{row_token} (mailtm email/token)")
+    print()
 
     results = []
     for i in range(1, args.accounts + 1):
@@ -106,13 +114,15 @@ def main():
 
     for r in results:
         n = r["account_num"]
-        row_user  = 1 + (n - 1) * 2     # B1, B3, B5
-        row_pass  = row_user + 1          # B2, B4, B6
-        row_token = 18 + n               # B19, B20, B21
+        row_user  = 1 + (n - 1) * 2     # B1, B3, B5, ..., B17
+        row_pass  = row_user + 1          # B2, B4, B6, ..., B18
+        row_email = 26 + (n - 1) * 2 + 1 # B27, B29, B31, ..., B43
+        row_token = row_email + 1         # B28, B30, B32, ..., B44
         print(f"  Account {n}:")
-        print(f"    B{row_user}  (Username)    : {r['mailtm_email']}")
-        print(f"    B{row_pass}  (Password)    : <the password you chose on the site>")
-        print(f"    B{row_token} (Mail.tm Token): {r['mailtm_token']}")
+        print(f"    B{row_user}  (Username)     : {r['mailtm_email']}")
+        print(f"    B{row_pass}  (Password)     : <the password you chose on the site>")
+        print(f"    B{row_email} (Mail.tm Email) : {r['mailtm_email']}")
+        print(f"    B{row_token} (Mail.tm Token) : {r['mailtm_token']}")
         print()
 
     print("  Done! Run main.py (or POST /start) to begin automation.")

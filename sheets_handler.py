@@ -4,17 +4,13 @@ sheets_handler.py
 All Google Sheets operations with auto-reconnect on idle-timeout.
 
 Config tab layout (column A = label, column B = value):
-  B1  Account1 Username
-  B2  Account1 Password
-  B3  Account2 Username
-  B4  Account2 Password
-  B5  Account3 Username
-  B6  Account3 Password
-  B7  Target
-  B8  OTP Timeout (min)
-  B9  Alert Email
-  B10 Alert Email Password
-  B11 Control  (pause / stop / restart — cleared after reading)
+  B1-B18   Account 1-9 credentials (Username / Password pairs)
+  B19      Target
+  B20      Alert Email
+  B21      Alert Email Password
+  B23      Control  (pause / stop / restart — cleared after reading)
+  B24      Residential Proxy URL  (optional, leave empty = direct connection)
+  B27-B44  Account 1-9 Mail.tm Email + Token pairs
 """
 import time
 import gspread
@@ -24,7 +20,7 @@ from datetime import datetime
 from config import (
     SPREADSHEET_ID, CREDENTIALS_FILE, CFG_ROW,
     SHEET_FOUND, SHEET_NOT_FOUND, SHEET_ERRORS,
-    SHEET_START, SHEET_CONFIG,
+    SHEET_START, SHEET_CONFIG, NUM_ACCOUNTS,
 )
 
 SCOPES = [
@@ -114,9 +110,10 @@ def load_config() -> dict:
 
     try:
         cfg = _with_retry(_do)
-        # Parse accounts list
+
+        # ── Accounts (up to NUM_ACCOUNTS) ─────────────────────────────
         accounts = []
-        for i in range(1, 4):
+        for i in range(1, NUM_ACCOUNTS + 1):
             u = cfg.get(f"account{i}_user", "").strip()
             p = cfg.get(f"account{i}_pass", "").strip()
             if u:
@@ -124,18 +121,22 @@ def load_config() -> dict:
         cfg["accounts"] = accounts
         cfg["target"]   = int(cfg.get("target", "100") or "100")
 
-        # OTP timeout removed from sheet — use hardcoded constant
+        # ── OTP timeout (hardcoded) ───────────────────────────────────
         from config import OTP_TIMEOUT_MIN
         cfg["otp_timeout_min"] = OTP_TIMEOUT_MIN
 
-        # Single rotating proxy URL (B12) — empty means direct connection
-        proxy_url     = cfg.get("proxy_url", "").strip()
-        cfg["proxies"] = [proxy_url] if proxy_url else []
+        # ── Residential proxy (B24) — single static IP ────────────────
+        # Accepts: http://ip:port  |  http://user:pass@ip:port
+        #          socks5://user:pass@ip:port  |  empty = direct
+        residential_proxy = cfg.get("residential_proxy", "").strip()
+        cfg["residential_proxy"] = residential_proxy or None
+        # Keep cfg["proxies"] as single-element list for backward compat
+        cfg["proxies"] = [residential_proxy] if residential_proxy else []
 
-        # Mail.tm — email + token pairs, indexed by account (0-based)
+        # ── Mail.tm tokens (B27-B44) ──────────────────────────────────
         mailtm_tokens = []
         mailtm_emails = []
-        for i in range(1, 4):
+        for i in range(1, NUM_ACCOUNTS + 1):
             email = cfg.get(f"mailtm_email_{i}", "").strip()
             token = cfg.get(f"mailtm_token_{i}", "").strip()
             mailtm_emails.append(email)
@@ -143,8 +144,7 @@ def load_config() -> dict:
         cfg["mailtm_emails"] = mailtm_emails
         cfg["mailtm_tokens"] = mailtm_tokens
 
-        # Map account username → mailtm token for easy lookup in searcher
-        # Key = site username (B1/B3/B5), value = mailtm token
+        # Map site username -> mailtm token for fast lookup in searcher
         cfg["mailtm_by_username"] = {}
         for i, acc in enumerate(accounts):
             if i < len(mailtm_tokens) and mailtm_tokens[i]:
@@ -152,16 +152,18 @@ def load_config() -> dict:
 
         print(f"   [SHEETS] Config loaded: {len(accounts)} accounts, "
               f"target={cfg['target']}, "
-              f"proxy={'set' if proxy_url else 'none'}, "
+              f"proxy={'set (' + residential_proxy.split('@')[-1] + ')' if residential_proxy else 'none (direct)'}, "
               f"mailtm={sum(1 for t in mailtm_tokens if t)} tokens")
         return cfg
     except Exception as e:
         print(f"   [SHEETS] ERROR loading config: {e}")
         from config import OTP_TIMEOUT_MIN
+        empty_tokens = [""] * NUM_ACCOUNTS
         return {"accounts": [], "target": 100, "otp_timeout_min": OTP_TIMEOUT_MIN,
                 "alert_email": "", "alert_password": "", "control": "",
-                "proxies": [], "mailtm_tokens": ["", "", ""],
-                "mailtm_emails": ["", "", ""],
+                "residential_proxy": None, "proxies": [],
+                "mailtm_tokens": empty_tokens,
+                "mailtm_emails": empty_tokens,
                 "mailtm_by_username": {}}
 
 
