@@ -4,6 +4,8 @@ account_creator.py
 Automates account creation on buycrash.lexisnexisrisk.com using SeleniumBase CDP mode and Mail.tm disposable emails.
 Loads USA billing address pools, name pools, and password pools. Logs registered accounts directly to the "Credentials" Google Sheet.
 """
+import ipaddress
+from _pytest import subtests
 import re
 import time
 import random
@@ -115,6 +117,16 @@ PASSWORDS = [
     "Platinum77&y", "Titanium88*z"
 ]
 
+STATE_INDEX = {
+    "AL": 1, "AK": 2, "AZ": 3, "AR": 4, "CA": 5, "CO": 6, "CT": 7,
+    "DE": 8, "FL": 9, "GA": 10, "HI": 11, "ID": 12, "IL": 13, "IN": 14,
+    "IA": 15, "KS": 16, "KY": 17, "LA": 18, "ME": 19, "MD": 20,
+    "MA": 21, "MI": 22, "MN": 23, "MS": 24, "MO": 25, "MT": 26,
+    "NE": 27, "NV": 28, "NH": 29, "NJ": 30, "NM": 31, "NY": 32,
+    "NC": 33, "ND": 34, "OH": 35, "OK": 36, "OR": 37, "PA": 38,
+    "RI": 39, "SC": 40, "SD": 41, "TN": 42, "TX": 43, "UT": 44,
+    "VT": 45, "VA": 46, "WA": 47, "WV": 48, "WI": 49, "WY": 50,
+}
 
 # ===================================================================
 # CORE AUTOMATION FLOW
@@ -179,7 +191,7 @@ def create_one_account(proxy: str = None) -> dict:
         sb_proxy = clean_proxy
         print(f"[CREATOR] Using proxy: {sb_proxy.split('@')[-1] if '@' in sb_proxy else sb_proxy}")
 
-    with SB(uc=True, test=False, locale="en", headless=True, proxy=sb_proxy) as sb:
+    with SB(uc=True, test=False, locale="en", headless=False, proxy=sb_proxy) as sb:
         print(f"[CREATOR] Opening registration page: {registration_url}")
         sb.activate_cdp_mode(registration_url)
         sb.sleep(4)
@@ -238,204 +250,152 @@ def create_one_account(proxy: str = None) -> dict:
                 print(f"[CREATOR] Continue fallback error: {e}")
                 
         sb.sleep(5)
-        
-        # --- Step 2: The long registration page ---
+        all_inputs = sb.cdp.evaluate("""
+            (function() {
+                var inputs = document.querySelectorAll('input, select');
+                var result = [];
+                for (var i = 0; i < inputs.length; i++) {
+                    var el = inputs[i];
+                    result.push(el.tagName + ' | name=' + (el.name||'') + 
+                            ' | id=' + (el.id||'') + 
+                            ' | type=' + (el.type||'') +
+                            ' | formcontrolname=' + (el.getAttribute('formcontrolname')||''));
+                }
+                return result.join('\\n');
+            })();
+        """)
+        print(f"[CREATOR] All form fields:\n{all_inputs}")
+
+        state_debug = sb.cdp.evaluate("""
+            (function() {
+                var selects = document.querySelectorAll('select');
+                var result = [];
+                for (var i = 0; i < selects.length; i++) {
+                    result.push('SELECT #' + i + ' id=' + selects[i].id + 
+                               ' options=' + selects[i].options.length +
+                               ' first3=' + Array.from(selects[i].options).slice(0,3).map(o=>o.value+'|'+o.text).join(','));
+                }
+                return result.join('\\n');
+            })();
+        """)
+        print(f"[CREATOR] Selects found:\n{state_debug}")
+
+        mat_select_debug = sb.cdp.evaluate("""
+            (function() {
+                var els = document.querySelectorAll('mat-select, .mat-mdc-select, [role="listbox"], [role="combobox"]');
+                var result = [];
+                for (var i = 0; i < els.length; i++) {
+                    result.push('EL #' + i + ': ' + els[i].tagName + 
+                               ' | id=' + els[i].id +
+                               ' | class=' + els[i].className.substring(0,80) +
+                               ' | aria-label=' + (els[i].getAttribute('aria-label')||'') +
+                               ' | aria-labelledby=' + (els[i].getAttribute('aria-labelledby')||''));
+                }
+                return result.length ? result.join('\\n') : 'NONE FOUND';
+            })();
+        """)
+        print(f"[CREATOR] Mat-select elements:\n{mat_select_debug}")
+
+        # --- Step 2: The long registration form ---
         print("[CREATOR] Processing the long registration form...")
-        
-        # Check radio button again if needed
-        try:
-            sb.cdp.evaluate('document.querySelector("input[id=\'involvedParty\']").click();')
-        except Exception:
-            pass
-            
+
         # First Name
-        first_filled = False
-        for sel in ["input[name='firstName']", "input[id='firstName']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, first_name)
-                first_filled = True; break
-            except Exception:
-                continue
-        if not first_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'firstName\']").value = "{first_name}";')
+        sb.cdp.click("#firstName"); sb.sleep(0.2); sb.cdp.type("#firstName", first_name)
 
         # Last Name
-        last_filled = False
-        for sel in ["input[name='lastName']", "input[id='lastName']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, last_name)
-                last_filled = True; break
-            except Exception:
-                continue
-        if not last_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'lastName\']").value = "{last_name}";')
+        sb.cdp.click("#lastName"); sb.sleep(0.2); sb.cdp.type("#lastName", last_name)
 
-        # Phone Number
-        phone_filled = False
-        for sel in ["input[name='phoneNumber']", "input[name='phone']", "input[id='phone']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, phone)
-                phone_filled = True; break
-            except Exception:
-                continue
-        if not phone_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'phoneNumber\']").value = "{phone}";')
+        # Phone
+        sb.cdp.click("#phone"); sb.sleep(0.2); sb.cdp.type("#phone", phone)
 
         # Street Address
-        addr_filled = False
-        for sel in ["input[name='streetAddress1']", "input[name='addressLine1']", "input[id='streetAddress1']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, address["street"])
-                addr_filled = True; break
-            except Exception:
-                continue
-        if not addr_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'streetAddress1\']").value = "{address["street"]}";')
+        sb.cdp.click("#streetAddress1"); sb.sleep(0.2); sb.cdp.type("#streetAddress1", address["street"])
 
         # City
-        city_filled = False
-        for sel in ["input[name='city']", "input[id='city']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, address["city"])
-                city_filled = True; break
-            except Exception:
-                continue
-        if not city_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'city\']").value = "{address["city"]}";')
+        sb.cdp.click("#city"); sb.sleep(0.2); sb.cdp.type("#city", address["city"])
 
-        # State dropdown
-        state_filled = False
-        for sel in ["select[name='state']", "select[id='state']"]:
-            try:
-                sb.cdp.click(sel)
-                sb.sleep(0.5)
-                sb.cdp.press_keys(sel, address["state"])
-                sb.sleep(0.5)
-                sb.cdp.press_keys(sel, "\n")
-                state_filled = True; break
-            except Exception:
-                continue
-        if not state_filled:
-            try:
-                sb.cdp.evaluate(f"""
-                    (function() {{
-                        var select = document.querySelector("select[name='state']") || document.querySelector("select[id='state']");
-                        if (select) {{
-                            select.value = "{address["state"]}";
-                            select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        # State — find the select by querying ALL selects, pick the state one
+        try:
+            state_index = STATE_INDEX.get(address["state"], 22)
+            sb.cdp.evaluate(f"""
+                (function() {{
+                    var selects = document.querySelectorAll('select');
+                    for (var i = 0; i < selects.length; i++) {{
+                        var s = selects[i];
+                        // Skip country dropdown (has "United States" as option)
+                        var isCountry = false;
+                        for (var o = 0; o < s.options.length; o++) {{
+                            if (s.options[o].text.includes('United States')) {{
+                                isCountry = true; break;
+                            }}
                         }}
-                    }})();
-                """)
-            except Exception:
-                pass
+                        if (!isCountry && s.options.length > 10) {{
+                            s.focus();
+                            s.selectedIndex = {state_index};
+                            s.dispatchEvent(new Event('change', {{bubbles: true}}));
+                            s.dispatchEvent(new Event('input', {{bubbles: true}}));
+                            s.dispatchEvent(new Event('blur', {{bubbles: true}}));
+                            console.log('State set to index {state_index}: ' + s.options[{state_index}].text);
+                            return;
+                        }}
+                    }}
+                }})();
+            """)
+            print(f"[CREATOR] State set: {address['state']} (index {state_index})")
+        except Exception as e:
+            print(f"[CREATOR] State error: {e}")
 
         # Zip
-        zip_filled = False
-        for sel in ["input[name='zip']", "input[name='zipCode']", "input[id='zip']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, address["zip"])
-                zip_filled = True; break
-            except Exception:
-                continue
-        if not zip_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'zip\']").value = "{address["zip"]}";')
+        sb.cdp.click("#zipCode"); sb.sleep(0.2); sb.cdp.type("#zipCode", address["zip"])
 
         # Portal User ID
-        user_filled = False
-        for sel in ["input[name='userId']", "input[name='username']", "input[id='userId']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, user_id)
-                user_filled = True; break
-            except Exception:
-                continue
-        if not user_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'userId\']").value = "{user_id}";')
+        sb.cdp.click("#loginId"); sb.sleep(0.2); sb.cdp.type("#loginId", user_id)
 
-        # Portal Password
-        pass_filled = False
-        for sel in ["input[name='password']", "input[type='password'][id*='password']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, portal_pass)
-                pass_filled = True; break
-            except Exception:
-                continue
-        if not pass_filled:
-            sb.cdp.evaluate(f'document.querySelector("input[name=\'password\']").value = "{portal_pass}";')
+        # Password
+        sb.cdp.click("#password"); sb.sleep(0.2); sb.cdp.type("#password", portal_pass)
 
-        # Confirm Portal Password
-        confirm_filled = False
-        for sel in ["input[name='reenterPassword']", "input[name='confirmPassword']", "input[type='password'][id*='confirm']"]:
-            try:
-                sb.cdp.click(sel); sb.sleep(0.2); sb.cdp.type(sel, portal_pass)
-                confirm_filled = True; break
-            except Exception:
-                continue
-        if not confirm_filled:
-            try:
-                sb.cdp.evaluate(f"""
-                    var pw = document.querySelectorAll("input[type='password']");
-                    if (pw.length > 1) {{
-                        pw[1].value = "{portal_pass}";
-                    }}
-                """)
-            except Exception:
-                pass
+        # Confirm Password
+        sb.cdp.click("#passwordConfirm"); sb.sleep(0.2); sb.cdp.type("#passwordConfirm", portal_pass)
 
-        # Email OTP Radio "Default" click
-        otp_radio_clicked = False
-        for sel in ["input[type='radio'][name='emailDefault']", "input[type='radio'][value='email']", "label:contains('Default')"]:
-            try:
-                sb.cdp.click(sel)
-                otp_radio_clicked = True
-                break
-            except Exception:
-                continue
-        if not otp_radio_clicked:
-            try:
-                sb.cdp.evaluate("""
-                    (function() {
-                        var radios = document.querySelectorAll("input[type='radio']");
-                        for (var i = 0; i < radios.length; i++) {
-                            var name = radios[i].getAttribute('name') || '';
-                            if (name.toLowerCase().includes('email')) {
-                                radios[i].click();
-                                break;
-                            }
-                        }
-                    })();
-                """)
-            except Exception:
-                pass
+        # OTP - select Email as Default (mat-radio-4-input is the Default radio next to email)
+        try:
+            sb.cdp.click("#mat-radio-4-input")
+            print("[CREATOR] OTP email Default radio selected")
+        except Exception as e:
+            print(f"[CREATOR] OTP radio error: {e}")
+        
+        sb.sleep(0.3)
 
-        # Check terms and conditions box
-        terms_checked = False
-        for sel in ["input[type='checkbox']", "input[name='terms']", "label:contains('agree')", "label:contains('Terms of Use')"]:
-            try:
-                sb.cdp.click(sel)
-                terms_checked = True
-                break
-            except Exception:
-                continue
-        if not terms_checked:
-            try:
-                sb.cdp.evaluate('document.querySelector("input[type=\'checkbox\']").click();')
-            except Exception:
-                pass
+        # Terms checkbox
+        try:
+            sb.cdp.click("#mat-mdc-checkbox-0-input")
+            print("[CREATOR] Terms checkbox checked")
+        except Exception as e:
+            print(f"[CREATOR] Checkbox error: {e}")
 
-        # Submit long form
-        form_submitted = False
-        for sel in ["button:contains('Continue Registration')", "input[value='Continue Registration']", "button[type='submit']"]:
-            try:
-                sb.cdp.click(sel)
-                form_submitted = True
-                break
-            except Exception:
-                continue
-        if not form_submitted:
-            try:
-                sb.cdp.evaluate('document.querySelector("button[type=\'submit\']").click();')
-            except Exception:
-                pass
+        sb.sleep(0.5)
+
+        # Submit - scroll down first, then click the Continue Registration button by text
+        # Scroll to bottom first
+        sb.cdp.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+        sb.sleep(1)
+
+        # Click Continue Registration by finding button with exact text
+        sb.cdp.evaluate("""
+            (function() {
+                var btns = document.querySelectorAll('button');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].textContent.trim() === 'Continue Registration') {
+                        btns[i].scrollIntoView();
+                        btns[i].click();
+                        console.log('Clicked Continue Registration button #' + i);
+                        return;
+                    }
+                }
+                console.log('Continue Registration button NOT found');
+            })();
+        """)
+        print("[CREATOR] Continue Registration clicked via exact text match")
 
         print("[CREATOR] Form submitted. Waiting for OTP page to load...")
         sb.sleep(6)
