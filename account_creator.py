@@ -314,34 +314,31 @@ def create_one_account(proxy: str = None) -> dict:
         # City
         sb.cdp.click("#city"); sb.sleep(0.2); sb.cdp.type("#city", address["city"])
 
-        # State — find the select by querying ALL selects, pick the state one
+        # State - Angular Material mat-select, click to open then click option
         try:
             state_index = STATE_INDEX.get(address["state"], 22)
+            
+            # Click the mat-select to open the dropdown panel
+            sb.cdp.click("mat-select#state")
+            sb.sleep(1)  # wait for panel to animate open
+            
+            # Options render in an overlay outside the main DOM
+            # Click the Nth mat-option (1-based index)
             sb.cdp.evaluate(f"""
                 (function() {{
-                    var selects = document.querySelectorAll('select');
-                    for (var i = 0; i < selects.length; i++) {{
-                        var s = selects[i];
-                        // Skip country dropdown (has "United States" as option)
-                        var isCountry = false;
-                        for (var o = 0; o < s.options.length; o++) {{
-                            if (s.options[o].text.includes('United States')) {{
-                                isCountry = true; break;
-                            }}
-                        }}
-                        if (!isCountry && s.options.length > 10) {{
-                            s.focus();
-                            s.selectedIndex = {state_index};
-                            s.dispatchEvent(new Event('change', {{bubbles: true}}));
-                            s.dispatchEvent(new Event('input', {{bubbles: true}}));
-                            s.dispatchEvent(new Event('blur', {{bubbles: true}}));
-                            console.log('State set to index {state_index}: ' + s.options[{state_index}].text);
-                            return;
-                        }}
+                    var options = document.querySelectorAll('mat-option');
+                    console.log('Found ' + options.length + ' mat-options');
+                    if (options.length >= {state_index}) {{
+                        options[{state_index} - 1].click();
+                        console.log('Clicked option: ' + options[{state_index} - 1].textContent.trim());
+                    }} else {{
+                        console.log('Not enough options: ' + options.length);
                     }}
                 }})();
             """)
-            print(f"[CREATOR] State set: {address['state']} (index {state_index})")
+            sb.sleep(0.5)
+            print(f"[CREATOR] State selected: {address['state']} (mat-option index {state_index})")
+            
         except Exception as e:
             print(f"[CREATOR] State error: {e}")
 
