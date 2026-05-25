@@ -153,9 +153,10 @@ def generate_user_id(email: str) -> str:
     return user_id
 
 
-def create_one_account(proxy: str = None) -> dict:
+def create_one_account(proxy: str = None, _retry: bool = False) -> dict:
     """
     Performs the full Mail.tm creation + BuyCrash registration + OTP submission.
+    Retries from scratch once if registration fails.
     """
     print("\n[CREATOR] Starting creation sequence...")
     
@@ -183,15 +184,13 @@ def create_one_account(proxy: str = None) -> dict:
     # 3. SeleniumBase registration
     registration_url = "https://buycrash.lexisnexisrisk.com/ui/auth/registration"
     
-    # Use residential proxy if configured
     sb_proxy = None
     if proxy:
-        # Standardize formatting for SeleniumBase: user:pass@host:port
         clean_proxy = proxy.replace("http://", "").replace("https://", "")
         sb_proxy = clean_proxy
         print(f"[CREATOR] Using proxy: {sb_proxy.split('@')[-1] if '@' in sb_proxy else sb_proxy}")
 
-    with SB(uc=True, test=False, locale="en", headless=False, proxy=sb_proxy) as sb:
+    with SB(uc=True, test=False, locale="en", headless=True, proxy=sb_proxy) as sb:
         print(f"[CREATOR] Opening registration page: {registration_url}")
         sb.activate_cdp_mode(registration_url)
         sb.sleep(4)
@@ -250,111 +249,39 @@ def create_one_account(proxy: str = None) -> dict:
                 print(f"[CREATOR] Continue fallback error: {e}")
                 
         sb.sleep(5)
-        all_inputs = sb.cdp.evaluate("""
-            (function() {
-                var inputs = document.querySelectorAll('input, select');
-                var result = [];
-                for (var i = 0; i < inputs.length; i++) {
-                    var el = inputs[i];
-                    result.push(el.tagName + ' | name=' + (el.name||'') + 
-                            ' | id=' + (el.id||'') + 
-                            ' | type=' + (el.type||'') +
-                            ' | formcontrolname=' + (el.getAttribute('formcontrolname')||''));
-                }
-                return result.join('\\n');
-            })();
-        """)
-        print(f"[CREATOR] All form fields:\n{all_inputs}")
-
-        state_debug = sb.cdp.evaluate("""
-            (function() {
-                var selects = document.querySelectorAll('select');
-                var result = [];
-                for (var i = 0; i < selects.length; i++) {
-                    result.push('SELECT #' + i + ' id=' + selects[i].id + 
-                               ' options=' + selects[i].options.length +
-                               ' first3=' + Array.from(selects[i].options).slice(0,3).map(o=>o.value+'|'+o.text).join(','));
-                }
-                return result.join('\\n');
-            })();
-        """)
-        print(f"[CREATOR] Selects found:\n{state_debug}")
-
-        mat_select_debug = sb.cdp.evaluate("""
-            (function() {
-                var els = document.querySelectorAll('mat-select, .mat-mdc-select, [role="listbox"], [role="combobox"]');
-                var result = [];
-                for (var i = 0; i < els.length; i++) {
-                    result.push('EL #' + i + ': ' + els[i].tagName + 
-                               ' | id=' + els[i].id +
-                               ' | class=' + els[i].className.substring(0,80) +
-                               ' | aria-label=' + (els[i].getAttribute('aria-label')||'') +
-                               ' | aria-labelledby=' + (els[i].getAttribute('aria-labelledby')||''));
-                }
-                return result.length ? result.join('\\n') : 'NONE FOUND';
-            })();
-        """)
-        print(f"[CREATOR] Mat-select elements:\n{mat_select_debug}")
 
         # --- Step 2: The long registration form ---
         print("[CREATOR] Processing the long registration form...")
 
-        # First Name
         sb.cdp.click("#firstName"); sb.sleep(0.2); sb.cdp.type("#firstName", first_name)
-
-        # Last Name
         sb.cdp.click("#lastName"); sb.sleep(0.2); sb.cdp.type("#lastName", last_name)
-
-        # Phone
         sb.cdp.click("#phone"); sb.sleep(0.2); sb.cdp.type("#phone", phone)
-
-        # Street Address
         sb.cdp.click("#streetAddress1"); sb.sleep(0.2); sb.cdp.type("#streetAddress1", address["street"])
-
-        # City
         sb.cdp.click("#city"); sb.sleep(0.2); sb.cdp.type("#city", address["city"])
 
-        # State - Angular Material mat-select, click to open then click option
+        # State - Angular Material mat-select
         try:
             state_index = STATE_INDEX.get(address["state"], 22)
-            
-            # Click the mat-select to open the dropdown panel
             sb.cdp.click("mat-select#state")
-            sb.sleep(1)  # wait for panel to animate open
-            
-            # Options render in an overlay outside the main DOM
-            # Click the Nth mat-option (1-based index)
+            sb.sleep(1)
             sb.cdp.evaluate(f"""
                 (function() {{
                     var options = document.querySelectorAll('mat-option');
-                    console.log('Found ' + options.length + ' mat-options');
                     if (options.length >= {state_index}) {{
                         options[{state_index} - 1].click();
-                        console.log('Clicked option: ' + options[{state_index} - 1].textContent.trim());
-                    }} else {{
-                        console.log('Not enough options: ' + options.length);
                     }}
                 }})();
             """)
             sb.sleep(0.5)
             print(f"[CREATOR] State selected: {address['state']} (mat-option index {state_index})")
-            
         except Exception as e:
             print(f"[CREATOR] State error: {e}")
 
-        # Zip
         sb.cdp.click("#zipCode"); sb.sleep(0.2); sb.cdp.type("#zipCode", address["zip"])
-
-        # Portal User ID
         sb.cdp.click("#loginId"); sb.sleep(0.2); sb.cdp.type("#loginId", user_id)
-
-        # Password
         sb.cdp.click("#password"); sb.sleep(0.2); sb.cdp.type("#password", portal_pass)
-
-        # Confirm Password
         sb.cdp.click("#passwordConfirm"); sb.sleep(0.2); sb.cdp.type("#passwordConfirm", portal_pass)
 
-        # OTP - select Email as Default (mat-radio-4-input is the Default radio next to email)
         try:
             sb.cdp.click("#mat-radio-4-input")
             print("[CREATOR] OTP email Default radio selected")
@@ -363,7 +290,6 @@ def create_one_account(proxy: str = None) -> dict:
         
         sb.sleep(0.3)
 
-        # Terms checkbox
         try:
             sb.cdp.click("#mat-mdc-checkbox-0-input")
             print("[CREATOR] Terms checkbox checked")
@@ -371,13 +297,9 @@ def create_one_account(proxy: str = None) -> dict:
             print(f"[CREATOR] Checkbox error: {e}")
 
         sb.sleep(0.5)
-
-        # Submit - scroll down first, then click the Continue Registration button by text
-        # Scroll to bottom first
         sb.cdp.evaluate("window.scrollTo(0, document.body.scrollHeight);")
         sb.sleep(1)
 
-        # Click Continue Registration by finding button with exact text
         sb.cdp.evaluate("""
             (function() {
                 var btns = document.querySelectorAll('button');
@@ -385,14 +307,12 @@ def create_one_account(proxy: str = None) -> dict:
                     if (btns[i].textContent.trim() === 'Continue Registration') {
                         btns[i].scrollIntoView();
                         btns[i].click();
-                        console.log('Clicked Continue Registration button #' + i);
                         return;
                     }
                 }
-                console.log('Continue Registration button NOT found');
             })();
         """)
-        print("[CREATOR] Continue Registration clicked via exact text match")
+        print("[CREATOR] Continue Registration clicked")
 
         print("[CREATOR] Form submitted. Waiting for OTP page to load...")
         sb.sleep(6)
@@ -408,7 +328,6 @@ def create_one_account(proxy: str = None) -> dict:
             
         print(f"[CREATOR] Got OTP passcode: {otp}")
         
-        # Enter OTP Passcode
         otp_filled = False
         for sel in ["input[name='passcode']", "input[placeholder='Passcode']", "input[type='text']"]:
             try:
@@ -421,7 +340,6 @@ def create_one_account(proxy: str = None) -> dict:
             
         sb.sleep(0.5)
         
-        # Click OTP Submit
         otp_submitted = False
         for sel in ["button:contains('Submit')", "button[type='submit']"]:
             try:
@@ -433,9 +351,21 @@ def create_one_account(proxy: str = None) -> dict:
             sb.cdp.evaluate('document.querySelector("button[type=\'submit\']").click();')
             
         sb.sleep(8)
-        print("[CREATOR] Registration submitted successfully!")
+
+        current_url = sb.cdp.get_current_url()
+        print(f"[CREATOR] Post-OTP URL: {current_url}")
         
-        # 4. Save details to Sheets "Credentials" page
+        if "ui/report/search" not in current_url:
+            sb.save_screenshot("creator_error_failed.png")
+            if _retry:
+                raise Exception(f"Registration failed after retry. Final URL: {current_url}")
+            else:
+                print("[CREATOR] Registration failed — retrying from scratch with new email...")
+                return create_one_account(proxy=proxy, _retry=True)
+
+        print("[CREATOR] Registration succeeded!")
+        
+        # 4. Save to Sheets
         billing_address = f"{address['street']}, {address['city']}, {address['state']} {address['zip']}"
         sheets_handler.save_created_account(
             email=email,
