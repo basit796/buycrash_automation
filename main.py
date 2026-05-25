@@ -132,24 +132,41 @@ def _limit_pause(slot_idx: int, report_num: int, accounts: list):
     _countdown("LIMIT", LIMIT_PAUSE_SEC)
 
 
-def _handle_all_slots_limit(cfg: dict, cursor: int) -> None:
+def _handle_all_slots_limit(cfg: dict, cursor: int, active_proxy: str) -> str:
     """
     Called when all slots hit SEARCH_LIMIT_REACHED in one cycle.
-    With a single residential IP there is no rotation — just wait.
+    Returns the proxy to use for the NEXT cycle:
+      - If residential proxy configured AND we're NOT already on it → switch to it
+      - If we're already on proxy (or no proxy configured)         → fall back to direct + wait
     """
+    configured_proxy = cfg.get("residential_proxy")
     wait_min = ALL_SLOTS_LIMIT_PAUSE_SEC // 60
-    proxy    = cfg.get("residential_proxy")
-    print(f"\n{'!'*60}")
-    print(f"  ALL SLOTS HIT SEARCH LIMIT")
-    if proxy:
-        print(f"  Proxy: {proxy.split('@')[-1] if '@' in proxy else proxy}")
+
+    if configured_proxy and active_proxy != configured_proxy:
+        # Switch TO proxy — no wait needed, new IP immediately
+        print(f"\n{'!'*60}")
+        print(f"  ALL SLOTS HIT LIMIT — switching to residential proxy")
+        print(f"  Proxy: {configured_proxy.split('@')[-1] if '@' in configured_proxy else configured_proxy}")
+        print(f"  Resuming from #{cursor} with proxy IP")
+        print(f"{'!'*60}")
+        mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
+                                      _elapsed(), cursor, 0)
+        return configured_proxy  # caller sets active_proxy = this
+
     else:
-        print(f"  Direct connection (no proxy configured)")
-    print(f"  Waiting {wait_min} min before retrying from #{cursor}")
-    print(f"{'!'*60}")
-    mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
-                                  _elapsed(), cursor, wait_min)
-    _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
+        # Either no proxy configured, or proxy also hit limit → fall back to direct + wait
+        if active_proxy:
+            print(f"\n{'!'*60}")
+            print(f"  PROXY ALSO HIT LIMIT — falling back to direct connection")
+        else:
+            print(f"\n{'!'*60}")
+            print(f"  ALL SLOTS HIT LIMIT — no proxy configured")
+        print(f"  Waiting {wait_min} min before retrying from #{cursor}")
+        print(f"{'!'*60}")
+        mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
+                                      _elapsed(), cursor, wait_min)
+        _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
+        return None  # caller sets active_proxy = None (direct connection)
 
 
 # -------------------------------------------------------------------
@@ -172,6 +189,7 @@ def _run(cfg: dict, start_report: int) -> str:
 
     current_report = start_report
     cycle_num      = 0
+    active_proxy   = None
 
     print(f"\nTarget  : {target} valid reports")
     print(f"Starting: report #{current_report}")
@@ -214,7 +232,7 @@ def _run(cfg: dict, start_report: int) -> str:
             try:
                 api_session = get_session_for_slot(
                     slot_idx, accounts, otp_timeout_min,
-                    proxy, cfg.get("mailtm_tokens", [])
+                    active_proxy, cfg.get("mailtm_tokens", [])
                 )
             except Exception as e:
                 err = str(e)
@@ -297,7 +315,7 @@ def _run(cfg: dict, start_report: int) -> str:
 
         # All slots that actually ran a batch hit the search limit
         if slots_attempted > 0 and limit_count >= slots_attempted:
-            _handle_all_slots_limit(cfg, cursor)
+            active_proxy = _handle_all_slots_limit(cfg, cursor, active_proxy)
             # cursor unchanged — retry from same position after 10-min wait
         else:
             current_report = cursor

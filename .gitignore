@@ -9,3 +9,8 @@ reports
 *.log
 .venv
 google_credentials.json
+*.pkl
+*.png
+crash_reports*.xlsx
+*.txt
+z.py
