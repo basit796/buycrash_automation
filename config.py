@@ -42,8 +42,8 @@ JURISDICTION = "Detroit Police Department"
 # ===================================================================
 # SLOT / ROTATION CONSTANTS
 # ===================================================================
-TOTAL_SLOTS               = 10     # 9 accounts + 1 no-login
-NO_LOGIN_SLOT             = 9      # index of the no-login slot
+TOTAL_SLOTS               = 15     # 14 accounts + 1 no-login
+NO_LOGIN_SLOT             = 14     # index of the no-login slot
 BATCH_SIZE                = 15     # reports per slot per cycle
 INTER_BATCH_PAUSE_SEC     = 60     # 1 min between slots
 LIMIT_PAUSE_SEC           = 60     # 1 min pause when a slot hits SEARCH_LIMIT
@@ -70,66 +70,39 @@ SHEET_CONFIG     = "Config"
 # ===================================================================
 # CONFIG SHEET ROW MAPPING  (column B = value)
 #
-# NEW LAYOUT — 9 accounts:
+# NEW LAYOUT — 14 accounts:
 #
-#   --- ACCOUNTS (B1 - B18, 2 rows each) ---
-#   B1   Account1 Username    (site login)
+#   --- ACCOUNTS (B1 - B28, 2 rows each) ---
+#   B1   Account1 Username
 #   B2   Account1 Password
 #   B3   Account2 Username
 #   B4   Account2 Password
-#   B5   Account3 Username
-#   B6   Account3 Password
-#   B7   Account4 Username
-#   B8   Account4 Password
-#   B9   Account5 Username
-#   B10  Account5 Password
-#   B11  Account6 Username
-#   B12  Account6 Password
-#   B13  Account7 Username
-#   B14  Account7 Password
-#   B15  Account8 Username
-#   B16  Account8 Password
-#   B17  Account9 Username
-#   B18  Account9 Password
+#   ...
+#   B27  Account14 Username
+#   B28  Account14 Password
 #
-#   --- SETTINGS (B19 - B26) ---
-#   B19  Target               (number of reports to find)
-#   B20  Alert Email
-#   B21  Alert Email Password
-#   B22  (empty)
-#   B23  Control              (pause / stop / restart — cleared after reading)
-#   B24  Residential Proxy    (optional — http://ip:port or socks5://ip:port)
-#                              Leave EMPTY for direct connection (fallback)
-#   B25  (empty)
-#   B26  (empty)
+#   --- SETTINGS (B29 - B36) ---
+#   B29  Target
+#   B30  Alert Email
+#   B31  Alert Email Password
+#   B32  (empty)
+#   B33  Control
+#   B34  Residential Proxy
+#   B35  (empty)
+#   B36  (empty)
 #
-#   --- MAIL.TM TOKENS (B27 - B44, 2 rows each) ---
-#   B27  Account1 Mail.tm Email
-#   B28  Account1 Mail.tm Token
-#   B29  Account2 Mail.tm Email
-#   B30  Account2 Mail.tm Token
-#   B31  Account3 Mail.tm Email
-#   B32  Account3 Mail.tm Token
-#   B33  Account4 Mail.tm Email
-#   B34  Account4 Mail.tm Token
-#   B35  Account5 Mail.tm Email
-#   B36  Account5 Mail.tm Token
-#   B37  Account6 Mail.tm Email
-#   B38  Account6 Mail.tm Token
-#   B39  Account7 Mail.tm Email
-#   B40  Account7 Mail.tm Token
-#   B41  Account8 Mail.tm Email
-#   B42  Account8 Mail.tm Token
-#   B43  Account9 Mail.tm Email
-#   B44  Account9 Mail.tm Token
+#   --- MAIL.TM TOKENS (B37 - B64, 2 rows each) ---
+#   B37  Account1 Mail.tm Email
+#   B38  Account1 Mail.tm Token
+#   B39  Account2 Mail.tm Email
+#   B40  Account2 Mail.tm Token
+#   ...
+#   B63  Account14 Mail.tm Email
+#   B64  Account14 Mail.tm Token
 #
-# Proxy URL formats accepted:
-#   http://ip:port                    (plain HTTP proxy)
-#   http://user:pass@ip:port          (authenticated HTTP proxy)
-#   socks5://user:pass@ip:port        (SOCKS5 — needs pip install requests[socks])
 # ===================================================================
 CFG_ROW = {
-    # Accounts
+    # Accounts (14 accounts × 2 rows = B1-B28)
     "account1_user":    "B1",
     "account1_pass":    "B2",
     "account2_user":    "B3",
@@ -148,37 +121,57 @@ CFG_ROW = {
     "account8_pass":    "B16",
     "account9_user":    "B17",
     "account9_pass":    "B18",
+    "account10_user":   "B19",
+    "account10_pass":   "B20",
+    "account11_user":   "B21",
+    "account11_pass":   "B22",
+    "account12_user":   "B23",
+    "account12_pass":   "B24",
+    "account13_user":   "B25",
+    "account13_pass":   "B26",
+    "account14_user":   "B27",
+    "account14_pass":   "B28",
     # Settings
-    "target":           "B19",
-    "alert_email":      "B20",
-    "alert_password":   "B21",
-    # B22 empty
-    "control":          "B23",
-    "residential_proxy":"B24",
-    # B25, B26 empty
-    # Mail.tm tokens
-    "mailtm_email_1":   "B27",
-    "mailtm_token_1":   "B28",
-    "mailtm_email_2":   "B29",
-    "mailtm_token_2":   "B30",
-    "mailtm_email_3":   "B31",
-    "mailtm_token_3":   "B32",
-    "mailtm_email_4":   "B33",
-    "mailtm_token_4":   "B34",
-    "mailtm_email_5":   "B35",
-    "mailtm_token_5":   "B36",
-    "mailtm_email_6":   "B37",
-    "mailtm_token_6":   "B38",
-    "mailtm_email_7":   "B39",
-    "mailtm_token_7":   "B40",
-    "mailtm_email_8":   "B41",
-    "mailtm_token_8":   "B42",
-    "mailtm_email_9":   "B43",
-    "mailtm_token_9":   "B44",
+    "target":           "B29",
+    "alert_email":      "B30",
+    "alert_password":   "B31",
+    # B32 empty
+    "control":          "B33",
+    "residential_proxy":"B34",
+    # B35, B36 empty
+    # Mail.tm tokens (14 accounts × 2 rows = B37-B64)
+    "mailtm_email_1":   "B37",
+    "mailtm_token_1":   "B38",
+    "mailtm_email_2":   "B39",
+    "mailtm_token_2":   "B40",
+    "mailtm_email_3":   "B41",
+    "mailtm_token_3":   "B42",
+    "mailtm_email_4":   "B43",
+    "mailtm_token_4":   "B44",
+    "mailtm_email_5":   "B45",
+    "mailtm_token_5":   "B46",
+    "mailtm_email_6":   "B47",
+    "mailtm_token_6":   "B48",
+    "mailtm_email_7":   "B49",
+    "mailtm_token_7":   "B50",
+    "mailtm_email_8":   "B51",
+    "mailtm_token_8":   "B52",
+    "mailtm_email_9":   "B53",
+    "mailtm_token_9":   "B54",
+    "mailtm_email_10":  "B55",
+    "mailtm_token_10":  "B56",
+    "mailtm_email_11":  "B57",
+    "mailtm_token_11":  "B58",
+    "mailtm_email_12":  "B59",
+    "mailtm_token_12":  "B60",
+    "mailtm_email_13":  "B61",
+    "mailtm_token_13":  "B62",
+    "mailtm_email_14":  "B63",
+    "mailtm_token_14":  "B64",
 }
 
 # Number of accounts supported
-NUM_ACCOUNTS = 9
+NUM_ACCOUNTS = 14
 
 # OTP timeout is hardcoded
 OTP_TIMEOUT_MIN = 60
