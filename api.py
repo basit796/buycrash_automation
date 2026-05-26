@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import sheets_handler
 
 load_dotenv()
 
@@ -228,9 +229,9 @@ def create_accounts(count: int = 6, x_api_key: str = Header(default="")):
             raise HTTPException(status_code=400, detail="An account creation job is already running.")
 
     # 3. Load proxy from sheets config B24
-    import sheets_handler
-    cfg = sheets_handler.load_config()
-    proxy = cfg.get("residential_proxy")
+    # cfg = sheets_handler.load_config()
+    # proxy = cfg.get("residential_proxy")
+    proxy = None
 
     # 4. Trigger creation in background thread
     threading.Thread(target=_run_creator, args=(count, proxy), daemon=True).start()

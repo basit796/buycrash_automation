@@ -318,6 +318,9 @@ def create_one_account(proxy: str = None, _retry: bool = False) -> dict:
         sb.sleep(6)
 
         # --- Step 3: Fetch OTP and verify ---
+        sb.save_screenshot("creator_before_otp_poll.png")
+        print("[CREATOR] Screenshot saved — check creator_before_otp_poll.png")
+
         print("[CREATOR] Polling Mail.tm for 6-digit OTP...")
         otp = mailreader.wait_for_otp(token=mailtm_token, max_wait_sec=120)
         
