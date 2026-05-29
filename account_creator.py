@@ -23,9 +23,12 @@ FIRST_NAMES = [
     "John", "Robert", "Michael", "William", "David", "Richard", "Joseph", "Thomas", "Charles", "Christopher",
     "Daniel", "Matthew", "Anthony", "Mark", "Donald", "Steven", "Paul", "Andrew", "Joshua", "Kenneth",
     "Kevin", "Brian", "George", "Edward", "Ronald", "Timothy", "Jason", "Jeffrey", "Ryan", "Jacob",
-    "Mary", "Patricia", "Jennifer", "Linda", "Elizabeth", "Barbara", "Susan", "Jessica", "Sarah", "Karen",
-    "Nancy", "Lisa", "Betty", "Margaret", "Sandra", "Ashley", "Kimberly", "Emily", "Donna", "Michelle",
-    "Carol", "Amanda", "Dorothy", "Melissa", "Deborah", "Stephanie", "Rebecca", "Sharon", "Laura", "Cynthia"
+    "Nicholas", "Eric", "Jonathan", "Stephen", "Larry", "Justin", "Scott", "Brandon", "Benjamin", "Samuel",
+    "Frank", "Gregory", "Raymond", "Alexander", "Patrick", "Jack", "Dennis", "Jerry", "Tyler", "Aaron",
+    "Jose", "Adam", "Nathan", "Henry", "Douglas", "Zachary", "Peter", "Kyle", "Walter", "Ethan",
+    "Jeremy", "Harold", "Carl", "Keith", "Roger", "Gerald", "Christian", "Terry", "Sean", "Arthur",
+    "Austin", "Noah", "Jesse", "Joe", "Bryan", "Billy", "Jordan", "Albert", "Dylan", "Bruce",
+    "Willie", "Gabriel", "Alan", "Juan", "Logan", "Wayne", "Ralph", "Roy", "Eugene", "Randy"
 ]
 
 LAST_NAMES = [
@@ -34,71 +37,112 @@ LAST_NAMES = [
     "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson",
     "Walker", "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
     "Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell", "Carter", "Roberts",
-    "Gomez", "Phillips", "Evans", "Diaz", "Parker", "Cruz", "Edwards", "Collins", "Reyes", "Stewart"
+    "Gomez", "Phillips", "Evans", "Diaz", "Parker", "Cruz", "Edwards", "Collins", "Reyes", "Stewart",
+    "Morris", "Morales", "Murphy", "Cook", "Rogers", "Gutierrez", "Ortiz", "Morgan", "Cooper", "Peterson",
+    "Bailey", "Reed", "Kelly", "Howard", "Ramos", "Kim", "Cox", "Ward", "Richardson", "Watson",
+    "Brooks", "Chavez", "Wood", "James", "Bennett", "Gray", "Mendoza", "Ruiz", "Hughes", "Price"
 ]
 
+# Real Michigan (Detroit Area) Addresses Dataset
+
 ADDRESSES = [
-    {"street": "1421 Lafayette Blvd", "city": "Detroit", "state": "MI", "zip": "48226"},
-    {"street": "834 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
-    {"street": "2250 E Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48211"},
-    {"street": "5901 Cass Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
-    {"street": "11000 W McNichols Rd", "city": "Detroit", "state": "MI", "zip": "48221"},
-    {"street": "3400 E Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "900 Bagley Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
-    {"street": "7310 W Vernor Hwy", "city": "Detroit", "state": "MI", "zip": "48209"},
-    {"street": "19701 W 7 Mile Rd", "city": "Detroit", "state": "MI", "zip": "48219"},
-    {"street": "14600 Fenkell Ave", "city": "Detroit", "state": "MI", "zip": "48227"},
-    {"street": "4201 Davison St", "city": "Detroit", "state": "MI", "zip": "48238"},
-    {"street": "8100 E Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48214"},
-    {"street": "2934 Rosa Parks Blvd", "city": "Detroit", "state": "MI", "zip": "48216"},
-    {"street": "16101 Harper Ave", "city": "Detroit", "state": "MI", "zip": "48224"},
-    {"street": "6101 Tireman Ave", "city": "Detroit", "state": "MI", "zip": "48204"},
-    {"street": "21000 Mack Ave", "city": "Grosse Pointe", "state": "MI", "zip": "48236"},
-    {"street": "3100 Gratiot Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "10200 W Outer Dr", "city": "Detroit", "state": "MI", "zip": "48223"},
-    {"street": "25 Peterboro St", "city": "Detroit", "state": "MI", "zip": "48201"},
-    {"street": "1150 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "1001 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "150 W Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "500 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "645 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "660 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "211 W Fort St", "city": "Detroit", "state": "MI", "zip": "48226"},
-    {"street": "645 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "400 Monroe St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "555 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "1200 Washington Blvd", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "230 E Grand River Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "1407 Randolph St", "city": "Detroit", "state": "MI", "zip": "48226"},
     {"street": "350 Madison St", "city": "Detroit", "state": "MI", "zip": "48226"},
-    {"street": "1300 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "1400 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "1500 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "1600 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "1900 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2140 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2200 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2300 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2400 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2500 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2600 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2700 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2800 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "2900 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3000 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3100 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3200 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3300 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3400 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3500 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3600 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3700 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3800 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "3900 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "4000 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "4100 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "4200 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "4300 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"},
-    {"street": "4400 E Lafayette St", "city": "Detroit", "state": "MI", "zip": "48207"}
+    {"street": "25 Peterboro St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "71 Garfield St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "441 W Canfield St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "15 E Kirby St", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "5200 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "4600 Cass Ave", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "5901 Cass Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "440 Burroughs St", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "11000 W McNichols Rd", "city": "Detroit", "state": "MI", "zip": "48221"},
+    {"street": "2250 E Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48211"},
+    {"street": "1421 Lafayette Blvd", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "834 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "3400 E Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "7310 W Vernor Hwy", "city": "Detroit", "state": "MI", "zip": "48209"},
+    {"street": "19701 W 7 Mile Rd", "city": "Detroit", "state": "MI", "zip": "48219"},
+    {"street": "14600 Fenkell Ave", "city": "Detroit", "state": "MI", "zip": "48227"},
+    {"street": "4201 W Davison St", "city": "Detroit", "state": "MI", "zip": "48238"},
+    {"street": "8100 E Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48214"},
+    {"street": "2934 Rosa Parks Blvd", "city": "Detroit", "state": "MI", "zip": "48216"},
+    {"street": "16101 Harper Ave", "city": "Detroit", "state": "MI", "zip": "48224"},
+    {"street": "6101 Tireman Ave", "city": "Detroit", "state": "MI", "zip": "48204"},
+    {"street": "21000 Mack Ave", "city": "Grosse Pointe Woods", "state": "MI", "zip": "48236"},
+    {"street": "3100 Gratiot Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "10200 W Outer Dr", "city": "Detroit", "state": "MI", "zip": "48223"},
+    {"street": "1150 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "2211 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "1 Campus Martius", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "500 Temple St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "3663 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "3011 W Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "461 Piquette Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "600 Renaissance Center", "city": "Detroit", "state": "MI", "zip": "48243"},
+    {"street": "2000 Brush St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "50 W Montcalm St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "2901 Grand River Ave", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "1845 E Warren Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "607 Shelby St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "719 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "440 Alfred St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "1435 Randolph St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "65 Cadillac Sq", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "1274 Library St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "1509 Broadway St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "100 Temple St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "3500 Russell St", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "Eastern Market Shed 5", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "2131 Beaufait St", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "8000 Kercheval Ave", "city": "Detroit", "state": "MI", "zip": "48214"},
+    {"street": "9600 Gratiot Ave", "city": "Detroit", "state": "MI", "zip": "48213"},
+    {"street": "1145 Griswold St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "1000 Beaubien Blvd", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "2799 W Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "6000 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "1528 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "100 Erskine St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "511 W Canfield St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "6640 E Jefferson Ave", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "630 Merrick St", "city": "Detroit", "state": "MI", "zip": "48208"},
+    {"street": "4731 Grand River Ave", "city": "Detroit", "state": "MI", "zip": "48208"},
+    {"street": "6053 Chase Rd", "city": "Dearborn", "state": "MI", "zip": "48126"},
+    {"street": "13624 Michigan Ave", "city": "Dearborn", "state": "MI", "zip": "48126"},
+    {"street": "4901 Evergreen Rd", "city": "Dearborn", "state": "MI", "zip": "48128"},
+    {"street": "16031 W McNichols Rd", "city": "Detroit", "state": "MI", "zip": "48235"},
+    {"street": "17340 Lahser Rd", "city": "Detroit", "state": "MI", "zip": "48219"},
+    {"street": "17180 Livernois Ave", "city": "Detroit", "state": "MI", "zip": "48221"},
+    {"street": "1254 Library St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "415 Clifford St", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "100 Marquette Dr", "city": "Detroit", "state": "MI", "zip": "48214"},
+    {"street": "8220 Second Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "5401 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "4707 St Antoine St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "1301 W Lafayette Blvd", "city": "Detroit", "state": "MI", "zip": "48226"},
+    {"street": "9850 Grand River Ave", "city": "Detroit", "state": "MI", "zip": "48204"},
+    {"street": "18100 Meyers Rd", "city": "Detroit", "state": "MI", "zip": "48235"},
+    {"street": "1331 Holden St", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "3031 W Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "4400 John R St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "2990 W Grand Blvd", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "1355 Atwater St", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "1340 E Atwater St", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "200 Walker St", "city": "Detroit", "state": "MI", "zip": "48207"},
+    {"street": "7430 2nd Ave", "city": "Detroit", "state": "MI", "zip": "48202"},
+    {"street": "71 W Warren Ave", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "474 Peterboro St", "city": "Detroit", "state": "MI", "zip": "48201"},
+    {"street": "1040 Woodward Ave", "city": "Detroit", "state": "MI", "zip": "48226"}
 ]
 
 PASSWORDS = [
@@ -114,7 +158,13 @@ PASSWORDS = [
     "Tango88*j", "Uniform99!k", "Victor11@l", "Whiskey22#m", "Xray33$n",
     "Yankee44%o", "Zulu55^p", "Amber88&q", "Bronze99*r", "Copper11!s",
     "Diamond22@t", "Emerald33#u", "Falcon44$v", "Gold55%w", "Silver66^x",
-    "Platinum77&y", "Titanium88*z"
+    "Platinum77&y", "Titanium88*z", "Rocket12@A", "Shadow34#B", "Thunder56$C",
+    "Lightning78%D", "Phoenix90^E", "Dragon21&F", "Tiger43*G", "Wolf65!H",
+    "Falcon87@J", "Viper19#K", "Panther31$L", "Ranger53%M", "Knight75^N",
+    "Samurai97&O", "Ninja28*P", "Hunter49!Q", "Spartan61@R", "Blaze83#S",
+    "Storm05$T", "Matrix27%U", "Quantum48^V", "Neptune69&W", "Mercury80*X",
+    "Saturn14!Y", "Jupiter36@Z", "Cosmos58#a", "Orbit79$b", "Galaxy91%c",
+    "Comet13^d", "Astro35&e", "Meteor57*f", "Rocket99!g", "Fusion22@h"
 ]
 
 STATE_INDEX = {
@@ -132,24 +182,42 @@ STATE_INDEX = {
 # CORE AUTOMATION FLOW
 # ===================================================================
 
-def generate_user_id(email: str) -> str:
+def generate_user_id(email: str, first_name: str, last_name: str) -> str:
     """
-    User ID Rule:
-    - Starts with letter
-    - 7 to 20 characters
-    - Alpha-numeric only
+    User ID Format:
+    first_name + last_name + 4 chars from email
+
+    Max length: 20
     """
-    prefix = email.split("@")[0]
-    user_id = re.sub(r"[^a-zA-Z0-9]", "", prefix)
-    if not user_id or not user_id[0].isalpha():
+
+    # Clean values
+    first = re.sub(r"[^a-zA-Z0-9]", "", first_name)
+    last = re.sub(r"[^a-zA-Z0-9]", "", last_name)
+
+    # Always keep 4 chars from email
+    email_prefix = email.split("@")[0]
+    email_part = re.sub(r"[^a-zA-Z0-9]", "", email_prefix)[:4]
+
+    # Reserve 4 chars for email part
+    remaining_length = 20 - len(email_part)
+
+    # Combine and trim names only
+    name_part = (first + last)[:remaining_length]
+
+    # Final user_id
+    user_id = name_part + email_part
+
+    # Ensure starts with letter
+    if not user_id[0].isalpha():
         user_id = "a" + user_id
-    
-    # Restrict to first 14 characters as per spec
-    user_id = user_id[:14]
-    
-    # Guarantee minimum 7 chars
+
+    # Final hard limit
+    user_id = user_id[:20]
+
+    # Ensure minimum length
     if len(user_id) < 7:
         user_id = (user_id + "1234567")[:7]
+
     return user_id
 
 
@@ -177,8 +245,9 @@ def create_one_account(proxy: str = None, _retry: bool = False) -> dict:
     email_pass = mail_acc["password"]
     mailtm_token = mail_acc["token"]
     print(f"[CREATOR] Generated email: {email}")
+    print(f"[CREATOR] Generated email password: {email_pass}")
     
-    user_id = generate_user_id(email)
+    user_id = generate_user_id(email, first_name, last_name)
     print(f"[CREATOR] Generated User ID: {user_id}")
     
     # 3. SeleniumBase registration
