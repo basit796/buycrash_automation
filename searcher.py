@@ -16,6 +16,7 @@ import re
 import time
 import random
 import pickle
+import threading
 import requests
 from seleniumbase import SB
 from config import (
@@ -28,6 +29,10 @@ from config import (
     CONSECUTIVE_ERROR_LIMIT,
     RESTART_PAUSE_SEC,
 )
+
+# How long (seconds) to wait for a browser login before giving up.
+# This prevents the script from hanging forever on a frozen browser.
+LOGIN_TIMEOUT_SEC = 300  # 5 minutes
 
 # -------------------------------------------------------------------
 # LIVE SITE KEY
@@ -370,22 +375,62 @@ def _handle_otp(sb, slot_idx: int, account_label: str,
 
 def _parse_sb_proxy(proxy: str) -> str:
     """
-    SeleniumBase proxy support is unreliable with complex passwords
-    (underscores, special chars) that providers like IPRoyal use.
-
-    We intentionally return None here — the browser is only used to
-    extract session cookies. The proxy is applied on the requests.Session
-    for all actual API calls, which is where the rate limit lives.
+    SeleniumBase proxy support is unreliable with complex passwords.
+    We return None — the proxy is applied on the requests.Session instead.
     """
     return None
 
 
 # -------------------------------------------------------------------
-# LOGIN VIA BROWSER
+# LOGIN VIA BROWSER  (with hard timeout)
 # -------------------------------------------------------------------
 
 def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
                        proxy: str = None, mailtm_token: str = None) -> dict:
+    """
+    Runs the browser login in a daemon thread so we can enforce a hard
+    timeout (LOGIN_TIMEOUT_SEC).  Raises Exception("LOGIN_TIMEOUT") if
+    the browser hangs longer than that.
+    """
+    username      = account["username"]
+    password      = account["password"]
+    account_label = f"Account {slot_idx + 1}: {username}"
+
+    result_box   = {"cookies": None, "error": None}
+    done_event   = threading.Event()
+
+    def _do_login():
+        try:
+            cookies = _login_via_browser_inner(
+                slot_idx, account, otp_timeout_min, proxy, mailtm_token
+            )
+            result_box["cookies"] = cookies
+        except Exception as e:
+            result_box["error"] = e
+        finally:
+            done_event.set()
+
+    t = threading.Thread(target=_do_login, daemon=True)
+    t.start()
+
+    timeout_msg = (f"   [SLOT {slot_idx}] Browser login timeout "
+                   f"({LOGIN_TIMEOUT_SEC}s) for {account_label}")
+    finished = done_event.wait(timeout=LOGIN_TIMEOUT_SEC)
+
+    if not finished:
+        print(timeout_msg)
+        # Thread is daemon — it will be abandoned; the main loop moves on.
+        raise Exception(f"LOGIN_TIMEOUT for slot {slot_idx} ({account_label})")
+
+    if result_box["error"] is not None:
+        raise result_box["error"]
+
+    return result_box["cookies"] or {}
+
+
+def _login_via_browser_inner(slot_idx: int, account: dict, otp_timeout_min: int,
+                              proxy: str = None, mailtm_token: str = None) -> dict:
+    """Original browser login logic (called inside the timeout thread)."""
     username      = account["username"]
     password      = account["password"]
     account_label = f"Account {slot_idx + 1}: {username}"
@@ -394,7 +439,7 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
 
     print(f"\n   [SLOT {slot_idx}] Logging in as {username}"
           + (f" via proxy {proxy.split('@')[-1]}" if proxy and "@" in proxy else "")
-          + "...")
+          + f"  (timeout={LOGIN_TIMEOUT_SEC}s)...")
 
     sb_proxy = _parse_sb_proxy(proxy)
 
@@ -485,10 +530,36 @@ def _login_via_browser(slot_idx: int, account: dict, otp_timeout_min: int,
 
 
 # -------------------------------------------------------------------
-# NO-LOGIN SESSION
+# NO-LOGIN SESSION  (also with hard timeout)
 # -------------------------------------------------------------------
 
 def _get_no_login_session(proxy: str = None) -> requests.Session:
+    result_box = {"session": None, "error": None}
+    done_event = threading.Event()
+
+    def _do():
+        try:
+            result_box["session"] = _get_no_login_session_inner(proxy)
+        except Exception as e:
+            result_box["error"] = e
+        finally:
+            done_event.set()
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    finished = done_event.wait(timeout=LOGIN_TIMEOUT_SEC)
+
+    if not finished:
+        print(f"   [NO-LOGIN] Browser timeout ({LOGIN_TIMEOUT_SEC}s)")
+        raise Exception("LOGIN_TIMEOUT for no-login slot")
+
+    if result_box["error"] is not None:
+        raise result_box["error"]
+
+    return result_box["session"]
+
+
+def _get_no_login_session_inner(proxy: str = None) -> requests.Session:
     cookie_dict = {}
     user_agent  = None
 
@@ -497,7 +568,8 @@ def _get_no_login_session(proxy: str = None) -> requests.Session:
     with SB(uc=True, test=False, locale="en", headless=True,
             proxy=sb_proxy) as sb:
         print(f"   [SLOT {NO_LOGIN_SLOT} / NO-LOGIN] Navigating to search page"
-              + (f" via {proxy.split('@')[-1]}" if proxy and "@" in proxy else "") + "...")
+              + (f" via {proxy.split('@')[-1]}" if proxy and "@" in proxy else "")
+              + f"  (timeout={LOGIN_TIMEOUT_SEC}s)...")
         sb.activate_cdp_mode(SEARCH_PAGE_URL)
         sb.sleep(5)
         print(f"   URL: {sb.cdp.get_current_url()}")
@@ -522,12 +594,6 @@ def get_session_for_slot(slot_idx: int, accounts: list,
                          otp_timeout_min: int,
                          proxy: str = None,
                          mailtm_tokens: list = None) -> requests.Session:
-    """
-    accounts        : list of {"username":..,"password":..} from Config sheet
-    otp_timeout_min : from Config sheet
-    proxy           : optional proxy URL
-    mailtm_tokens   : list of Mail.tm tokens indexed by slot (slot 0 = index 0)
-    """
     if slot_idx == NO_LOGIN_SLOT:
         return _get_no_login_session(proxy)
 
@@ -539,7 +605,6 @@ def get_session_for_slot(slot_idx: int, accounts: list,
                      if mailtm_tokens and slot_idx < len(mailtm_tokens)
                      else None) or None
 
-    # When proxy changes, force fresh login (cached cookies are IP-bound)
     saved = _load_cookies(slot_idx)
     if saved:
         cookie_dict      = saved.get("cookies", {})
@@ -560,7 +625,6 @@ def get_session_for_slot(slot_idx: int, accounts: list,
 
     saved = _load_cookies(slot_idx)
     ua    = saved.get("user_agent") if saved else None
-    # Store proxy alongside cookies so we can detect proxy change next run
     _save_cookies(slot_idx, {"cookies": cookie_dict, "user_agent": ua, "proxy": proxy})
     return _build_api_session(cookie_dict, ua, proxy)
 
@@ -640,13 +704,9 @@ def _search_via_api(api_session: requests.Session,
         if code == "VALIDATION_ERROR":
             msgs = data.get("validationMessages", [])
             print(f"   [DEBUG] Validation: {msgs}")
-            # If the captcha token itself was rejected, raise so the retry
-            # loop re-solves a fresh token instead of marking as NOT FOUND
             bad_fields = [m.get("fieldName", "") for m in msgs]
             if "captchaToken" in bad_fields:
                 raise Exception("CAPTCHA_INVALID — server rejected token, re-solving")
-            # Other field validation errors (wrong report format, etc.) are
-            # treated as not-found for this report
             return None
 
         if code == "OK":
@@ -673,7 +733,6 @@ def _search_via_api(api_session: requests.Session,
     else:
         print(f"   [DEBUG] Unexpected HTTP {resp.status_code}")
         return None
-
 
 
 # -------------------------------------------------------------------
@@ -713,7 +772,7 @@ def run_slot_batch(slot_idx: int,
     found_count       = 0
     consecutive_errs  = 0
     slot_label        = f"SLOT {slot_idx}" if slot_idx < NO_LOGIN_SLOT else f"SLOT {NO_LOGIN_SLOT}/NO-LOGIN"
-    next_report       = report_numbers[-1] + 1   # default: completed full batch
+    next_report       = report_numbers[-1] + 1
 
     for i, report_num in enumerate(report_numbers):
 
@@ -756,7 +815,7 @@ def run_slot_batch(slot_idx: int,
 
                 if result is not None:
                     found_count      += 1
-                    consecutive_errs  = 0   # reset on any success
+                    consecutive_errs  = 0
                     found_callback(result)
                     print(f"   [{slot_label}] Found: {found_count} | "
                           f"Global: {found_so_far + found_count}/{target}")
@@ -765,7 +824,7 @@ def run_slot_batch(slot_idx: int,
                         next_report = report_num + 1
                         return found_count, next_report, "ok"
                 else:
-                    consecutive_errs = 0   # not-found is a clean result
+                    consecutive_errs = 0
                     not_found_callback(report_str)
 
                 success = True

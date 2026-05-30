@@ -45,7 +45,6 @@ def _check_timeout():
     """Call this periodically — returns True if 12h limit exceeded."""
     elapsed = time.time() - _script_start
     if elapsed >= MAX_RUN_SECONDS:
-        remaining_h = 0
         print(f"\n{'!'*60}")
         print(f"  AUTO-TERMINATE: {MAX_RUN_HOURS}h time limit reached")
         print(f"  Started : {datetime.fromtimestamp(_script_start).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -90,6 +89,19 @@ def _slot_label(slot_idx: int, accounts: list) -> str:
 
 
 # -------------------------------------------------------------------
+# Progress helpers — save to both local file AND Google Sheet
+# -------------------------------------------------------------------
+
+def _save_progress_everywhere(next_number: int):
+    """
+    Persist next_number in both the local progress file and A2 of the
+    Start Number sheet.  next_number = last_searched_report + 1.
+    """
+    save_progress(next_number)
+    sheets_handler.save_progress_to_sheet(next_number)
+
+
+# -------------------------------------------------------------------
 # Callbacks
 # -------------------------------------------------------------------
 
@@ -101,10 +113,16 @@ def _make_callbacks(cfg: dict):
         _found_total   += 1
         _searches_done += 1
         save_found_report(record)
+        rn = str(record.get("reportNumber", ""))
         sheets_handler.save_found(
-            report_number    = str(record.get("reportNumber", "")),
+            report_number    = rn,
             date_of_incident = str(record.get("dateOfIncident", "")),
         )
+        # Persist progress: next search = this report + 1
+        try:
+            _save_progress_everywhere(int(rn) + 1)
+        except Exception:
+            pass
 
     def on_not_found(report_number: str):
         global _searches_done, _not_found_count
@@ -112,6 +130,11 @@ def _make_callbacks(cfg: dict):
         _not_found_count += 1
         save_not_found_report(report_number)
         sheets_handler.save_not_found(report_number)
+        # Persist progress: next search = this report + 1
+        try:
+            _save_progress_everywhere(int(report_number) + 1)
+        except Exception:
+            pass
 
     def on_error(report_number: str, error_msg: str):
         global _searches_done, _error_count
@@ -120,6 +143,11 @@ def _make_callbacks(cfg: dict):
         print(f"   [ERROR FINAL] {report_number}: {error_msg[:80]}")
         sheets_handler.save_error(report_number, error_msg)
         save_not_found_report(f"ERROR:{report_number}")
+        # Persist progress even on error: next search = this report + 1
+        try:
+            _save_progress_everywhere(int(report_number) + 1)
+        except Exception:
+            pass
 
     return on_found, on_not_found, on_error
 
@@ -156,21 +184,10 @@ def _limit_pause(slot_idx: int, report_num: int, accounts: list):
 # -------------------------------------------------------------------
 
 def _handle_all_slots_limit(cfg: dict, cursor: int, active_proxy: str) -> str:
-    """
-    Called when ALL slots hit SEARCH_LIMIT_REACHED in one cycle.
-
-    Logic:
-      - On direct IP + proxy configured  → switch TO proxy, no wait
-      - On direct IP + no proxy          → wait 10 min, stay direct
-      - On proxy + proxy hit limit too   → switch BACK to direct, wait 10 min
-    
-    Returns the active_proxy value to use for the next cycle.
-    """
     configured_proxy = cfg.get("residential_proxy")
     wait_min         = ALL_SLOTS_LIMIT_PAUSE_SEC // 60
 
     if not active_proxy and configured_proxy:
-        # Currently on direct IP, proxy available → switch to proxy, no wait
         host = configured_proxy.split('@')[-1] if '@' in configured_proxy else configured_proxy
         print(f"\n{'!'*60}")
         print(f"  ALL SLOTS HIT LIMIT on direct IP")
@@ -182,7 +199,6 @@ def _handle_all_slots_limit(cfg: dict, cursor: int, active_proxy: str) -> str:
         return configured_proxy
 
     elif active_proxy and configured_proxy:
-        # Currently on proxy, proxy also hit limit → fall back to direct + wait
         print(f"\n{'!'*60}")
         print(f"  PROXY ALSO HIT LIMIT — switching back to direct IP")
         print(f"  Waiting {wait_min} min before retrying from #{cursor}")
@@ -190,10 +206,9 @@ def _handle_all_slots_limit(cfg: dict, cursor: int, active_proxy: str) -> str:
         mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
                                       _elapsed(), cursor, wait_min)
         _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
-        return None  # back to direct
+        return None
 
     else:
-        # No proxy configured at all → just wait
         print(f"\n{'!'*60}")
         print(f"  ALL SLOTS HIT LIMIT — no proxy configured")
         print(f"  Waiting {wait_min} min before retrying from #{cursor}")
@@ -219,7 +234,13 @@ def _run(cfg: dict, start_report: int) -> str:
 
     current_report = start_report
     cycle_num      = 0
-    active_proxy   = None   # starts on direct IP always
+    active_proxy   = None
+
+    # How many back-to-back cycles had ZERO successful logins.
+    # If this hits ALL_LOGIN_FAIL_CYCLE_LIMIT we pause and alert rather
+    # than spinning forever on the same report numbers.
+    ALL_LOGIN_FAIL_CYCLE_LIMIT = 3
+    consecutive_all_login_fail = 0
 
     print(f"\nTarget  : {target} valid reports")
     print(f"Starting: report #{current_report}")
@@ -230,17 +251,17 @@ def _run(cfg: dict, start_report: int) -> str:
 
     while _found_total < target:
 
-        # ── Timeout check at top of every cycle ─────────────────────
         if _check_timeout():
-            save_progress(current_report)
+            _save_progress_everywhere(current_report)
             mailer.send_crash(cfg,
                               Exception(f"Auto-terminated after {MAX_RUN_HOURS}h"),
                               _found_total, _searches_done, _elapsed())
             return "timeout"
 
-        cycle_num   += 1
-        cursor       = current_report
-        limit_count  = 0
+        cycle_num        += 1
+        cursor            = current_report
+        limit_count       = 0
+        login_fail_count  = 0   # slots that failed login this cycle
 
         print(f"\n{'#'*60}")
         print(f"  CYCLE #{cycle_num:03d}  —  cursor={cursor}  found={_found_total}/{target}")
@@ -253,9 +274,8 @@ def _run(cfg: dict, start_report: int) -> str:
 
         for slot_idx in range(TOTAL_SLOTS):
 
-            # Timeout check before each slot
             if _check_timeout():
-                save_progress(cursor)
+                _save_progress_everywhere(cursor)
                 mailer.send_crash(cfg,
                                   Exception(f"Auto-terminated after {MAX_RUN_HOURS}h"),
                                   _found_total, _searches_done, _elapsed())
@@ -275,7 +295,7 @@ def _run(cfg: dict, start_report: int) -> str:
             if last_active_slot is not None:
                 _inter_slot_pause(last_active_slot, slot_idx, accounts)
 
-            # Acquire session — pass active_proxy (None = direct, URL = proxy)
+            # Acquire session
             try:
                 api_session = get_session_for_slot(
                     slot_idx, accounts, otp_timeout_min,
@@ -294,9 +314,14 @@ def _run(cfg: dict, start_report: int) -> str:
                                               f"OTP timeout for {lbl}")
                 elif "LOGIN_FAILED" in err:
                     print(f"\n   [LOGIN FAILED] {_slot_label(slot_idx, accounts)} — skipping")
+                elif "LOGIN_TIMEOUT" in err:
+                    print(f"\n   [LOGIN TIMEOUT] {_slot_label(slot_idx, accounts)} — browser hung, skipping")
+                    sheets_handler.save_error(f"LOGIN_TIMEOUT_SLOT{slot_idx}",
+                                              f"Browser login timed out for {_slot_label(slot_idx, accounts)}")
                 else:
                     print(f"\n   [SESSION ERROR] {_slot_label(slot_idx, accounts)}: {e}")
-                last_active_slot = slot_idx
+                login_fail_count += 1
+                last_active_slot  = slot_idx
                 continue
 
             slots_attempted += 1
@@ -330,25 +355,26 @@ def _run(cfg: dict, start_report: int) -> str:
                 print(f"   Session lost — next slot resumes from {cursor}")
 
             elif status == "consecutive_errors":
+                _save_progress_everywhere(next_report)
                 mailer.send_consecutive_errors(
                     cfg, str(next_report), "20 consecutive errors",
                     _found_total, _searches_done, _elapsed()
                 )
-                save_progress(next_report)
                 return "consecutive_errors"
 
             elif status == "control:stop":
+                _save_progress_everywhere(next_report)
                 mailer.send_user_stop(cfg, _found_total, _searches_done, _elapsed())
-                save_progress(next_report)
                 return "stop"
 
             elif status == "control:restart":
+                _save_progress_everywhere(next_report)
                 mailer.send_restart(cfg, _found_total, _searches_done,
                                     _elapsed(), next_report)
-                save_progress(next_report)
                 return "restart"
 
-            save_progress(cursor)
+            # Save after every slot regardless of status
+            _save_progress_everywhere(cursor)
 
             if _found_total >= target:
                 break
@@ -357,13 +383,37 @@ def _run(cfg: dict, start_report: int) -> str:
         if _found_total >= target:
             break
 
-        if slots_attempted > 0 and limit_count >= slots_attempted:
-            # All slots hit limit — run proxy switching logic
+        # All slots failed login — cursor hasn't moved at all
+        if slots_attempted == 0 and login_fail_count == TOTAL_SLOTS:
+            consecutive_all_login_fail += 1
+            print(f"\n{'!'*60}")
+            print(f"  ALL {TOTAL_SLOTS} SLOTS FAILED LOGIN this cycle "
+                  f"({consecutive_all_login_fail}/{ALL_LOGIN_FAIL_CYCLE_LIMIT})")
+            print(f"  cursor stays at #{cursor} — no numbers were skipped")
+            print(f"{'!'*60}")
+            if consecutive_all_login_fail >= ALL_LOGIN_FAIL_CYCLE_LIMIT:
+                print(f"  {ALL_LOGIN_FAIL_CYCLE_LIMIT} consecutive all-login-fail cycles — pausing 10 min then alerting")
+                _save_progress_everywhere(cursor)
+                mailer.send_crash(
+                    cfg,
+                    Exception(f"All slots failed login for {ALL_LOGIN_FAIL_CYCLE_LIMIT} cycles in a row"),
+                    _found_total, _searches_done, _elapsed()
+                )
+                _countdown("ALL-LOGIN-FAIL", 600)   # wait 10 min, then retry
+                consecutive_all_login_fail = 0       # reset and keep going
+            else:
+                print(f"  Waiting 2 min before retrying...")
+                _countdown("ALL-LOGIN-FAIL", 120)
+            # cursor does NOT move — same numbers will be retried next cycle
+            current_report = cursor
+        elif slots_attempted > 0 and limit_count >= slots_attempted:
+            consecutive_all_login_fail = 0
             active_proxy = _handle_all_slots_limit(cfg, cursor, active_proxy)
         else:
+            consecutive_all_login_fail = 0
             current_report = cursor
 
-        save_progress(current_report)
+        _save_progress_everywhere(current_report)
         print(f"\nCycle #{cycle_num:03d} complete. Next from #{current_report}. "
               f"Found {_found_total}/{target} | IP: {'proxy' if active_proxy else 'direct'}")
 
@@ -389,14 +439,12 @@ def main():
     print("=" * 60)
 
     while True:
-        # Reset counters on every (re)start
         _found_total      = 0
         _searches_done    = 0
         _not_found_count  = 0
         _error_count      = 0
         _start_time       = time.time()
 
-        # Timeout check before doing anything
         if _check_timeout():
             print(f"\n[EXIT] {MAX_RUN_HOURS}h limit reached before cycle could start.")
             break
@@ -443,6 +491,11 @@ def main():
         except Exception as e:
             print(f"\n[CRASH] Unhandled exception: {e}")
             print(traceback.format_exc())
+            # Save whatever cursor we had before the crash
+            try:
+                _save_progress_everywhere(start_report)
+            except Exception:
+                pass
             mailer.send_crash(cfg, e, _found_total, _searches_done, _elapsed())
             outcome = "crash"
 

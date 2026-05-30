@@ -217,6 +217,24 @@ def get_start_number() -> int:
         return 0
 
 
+def save_progress_to_sheet(next_number: int):
+    """
+    Write next_number into the Start Number sheet at A2.
+    Called after every report (found/not-found/error) and on any
+    exit path so the script always resumes from the right place.
+    next_number should be last_searched + 1.
+    """
+    def _do():
+        ws = _get_spreadsheet().worksheet(SHEET_START)
+        ws.update("A2", [[str(next_number)]])
+        print(f"   [PROGRESS] Saving next start number to sheet: {next_number}")
+        print(f"   [SHEETS] Next start number saved: {next_number}")
+    try:
+        _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR save_progress_to_sheet: {e}")
+
+
 def get_otp_from_sheet() -> str:
     def _do():
         ws  = _get_spreadsheet().worksheet(SHEET_START)
