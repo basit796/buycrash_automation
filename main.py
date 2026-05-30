@@ -5,20 +5,8 @@ Orchestrator for BuyCrash report automation.
 
 Usage:
     python main.py                  # normal run
-    python main.py --reset          # ignored (progress.txt removed), kept for compat
+    python main.py --reset          # reset progress, start fresh
     python main.py --start 1525123  # override start report number
-
-Flow each run:
-  Phase 1 — Re-check up to NOT_FOUND_RECHECK_LIMIT entries from the
-             Not Found sheet.  Any that come back as Found are moved
-             to the Found sheet and removed from Not Found.
-  Phase 2 — Sequential fresh search starting from the number stored
-             in the Start Number sheet (A2), continuing until the
-             daily target is reached.
-
-On every exit the next cursor is written back to A2 so the next run
-resumes exactly where this one stopped.  A2 is cleared the moment it
-is read at startup to prevent stale reuse.
 
 Auto-terminates after 12 hours as a safety net.
 """
@@ -41,15 +29,9 @@ from config import (
     ALL_SLOTS_LIMIT_PAUSE_SEC, RESTART_PAUSE_SEC,
     CONSECUTIVE_ERROR_LIMIT,
 )
+from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
 from searcher import get_session_for_slot, run_slot_batch
-
-# ===================================================================
-# HOW MANY NOT-FOUND ENTRIES TO RE-CHECK EACH RUN
-# Keep this low enough that Phase 2 still has budget for fresh numbers.
-# With ~300 total searches/day, 100 re-checks leaves 200 for fresh work.
-# ===================================================================
-NOT_FOUND_RECHECK_LIMIT = 100
 
 # ===================================================================
 # AUTO-TERMINATE AFTER 12 HOURS
@@ -60,8 +42,10 @@ _script_start   = time.time()
 
 
 def _check_timeout():
+    """Call this periodically — returns True if 12h limit exceeded."""
     elapsed = time.time() - _script_start
     if elapsed >= MAX_RUN_SECONDS:
+        remaining_h = 0
         print(f"\n{'!'*60}")
         print(f"  AUTO-TERMINATE: {MAX_RUN_HOURS}h time limit reached")
         print(f"  Started : {datetime.fromtimestamp(_script_start).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -82,20 +66,11 @@ def _time_remaining_str() -> str:
 # -------------------------------------------------------------------
 # Runtime counters
 # -------------------------------------------------------------------
-# Phase 1 (Not Found re-checks)
-_recheck_searched  = 0   # how many not-found entries were re-checked
-_recheck_found     = 0   # how many of those came back as Found
-
-# Phase 2 (fresh sequential)
-_fresh_found       = 0
-_fresh_searches    = 0
-
-# Shared / legacy (kept so mailer calls still work)
-_found_total       = 0
-_searches_done     = 0
-_not_found_count   = 0
-_error_count       = 0
-_start_time        = time.time()
+_found_total     = 0
+_searches_done   = 0
+_not_found_count = 0
+_error_count     = 0
+_start_time      = time.time()
 
 
 def _elapsed() -> float:
@@ -115,26 +90,16 @@ def _slot_label(slot_idx: int, accounts: list) -> str:
 
 
 # -------------------------------------------------------------------
-# Callbacks — accept an optional flag to count phase-1 separately
+# Callbacks
 # -------------------------------------------------------------------
 
-def _make_callbacks(cfg: dict, phase: int = 2):
-    """
-    phase=1  → increments recheck counters
-    phase=2  → increments fresh counters
-    Both phases increment the shared _found_total / _searches_done.
-    """
+def _make_callbacks(cfg: dict):
     global _found_total, _searches_done, _not_found_count, _error_count
-    global _recheck_searched, _recheck_found, _fresh_found, _fresh_searches
 
     def on_found(record: dict):
-        global _found_total, _searches_done, _recheck_found, _fresh_found
+        global _found_total, _searches_done
         _found_total   += 1
         _searches_done += 1
-        if phase == 1:
-            _recheck_found += 1
-        else:
-            _fresh_found += 1
         save_found_report(record)
         sheets_handler.save_found(
             report_number    = str(record.get("reportNumber", "")),
@@ -142,17 +107,11 @@ def _make_callbacks(cfg: dict, phase: int = 2):
         )
 
     def on_not_found(report_number: str):
-        global _searches_done, _not_found_count, _recheck_searched, _fresh_searches
+        global _searches_done, _not_found_count
         _searches_done   += 1
         _not_found_count += 1
-        if phase == 1:
-            _recheck_searched += 1
-        else:
-            _fresh_searches += 1
         save_not_found_report(report_number)
-        # Phase 1: do NOT write back to Not Found sheet — the entry is already there
-        if phase == 2:
-            sheets_handler.save_not_found(report_number)
+        sheets_handler.save_not_found(report_number)
 
     def on_error(report_number: str, error_msg: str):
         global _searches_done, _error_count
@@ -171,6 +130,7 @@ def _make_callbacks(cfg: dict, phase: int = 2):
 
 def _countdown(label: str, seconds: int, interval: int = 30):
     for remaining in range(seconds, 0, -interval):
+        # Check timeout during long waits
         if _check_timeout():
             return
         m, s = divmod(remaining, 60)
@@ -195,11 +155,22 @@ def _limit_pause(slot_idx: int, report_num: int, accounts: list):
 # ALL SLOTS LIMIT — proxy switching logic
 # -------------------------------------------------------------------
 
-def _handle_all_slots_limit(cfg: dict, cursor, active_proxy: str) -> str:
+def _handle_all_slots_limit(cfg: dict, cursor: int, active_proxy: str) -> str:
+    """
+    Called when ALL slots hit SEARCH_LIMIT_REACHED in one cycle.
+
+    Logic:
+      - On direct IP + proxy configured  → switch TO proxy, no wait
+      - On direct IP + no proxy          → wait 10 min, stay direct
+      - On proxy + proxy hit limit too   → switch BACK to direct, wait 10 min
+    
+    Returns the active_proxy value to use for the next cycle.
+    """
     configured_proxy = cfg.get("residential_proxy")
     wait_min         = ALL_SLOTS_LIMIT_PAUSE_SEC // 60
 
     if not active_proxy and configured_proxy:
+        # Currently on direct IP, proxy available → switch to proxy, no wait
         host = configured_proxy.split('@')[-1] if '@' in configured_proxy else configured_proxy
         print(f"\n{'!'*60}")
         print(f"  ALL SLOTS HIT LIMIT on direct IP")
@@ -211,6 +182,7 @@ def _handle_all_slots_limit(cfg: dict, cursor, active_proxy: str) -> str:
         return configured_proxy
 
     elif active_proxy and configured_proxy:
+        # Currently on proxy, proxy also hit limit → fall back to direct + wait
         print(f"\n{'!'*60}")
         print(f"  PROXY ALSO HIT LIMIT — switching back to direct IP")
         print(f"  Waiting {wait_min} min before retrying from #{cursor}")
@@ -218,9 +190,10 @@ def _handle_all_slots_limit(cfg: dict, cursor, active_proxy: str) -> str:
         mailer.send_proxies_exhausted(cfg, _found_total, _searches_done,
                                       _elapsed(), cursor, wait_min)
         _countdown("ALL-SLOTS LIMIT", ALL_SLOTS_LIMIT_PAUSE_SEC)
-        return None
+        return None  # back to direct
 
     else:
+        # No proxy configured at all → just wait
         print(f"\n{'!'*60}")
         print(f"  ALL SLOTS HIT LIMIT — no proxy configured")
         print(f"  Waiting {wait_min} min before retrying from #{cursor}")
@@ -232,177 +205,38 @@ def _handle_all_slots_limit(cfg: dict, cursor, active_proxy: str) -> str:
 
 
 # -------------------------------------------------------------------
-# SAVE EXIT CURSOR — always call before exiting
+# SINGLE RUN
 # -------------------------------------------------------------------
 
-def _save_exit_cursor(cursor: int):
-    """Write next start number to Google Sheet A2 and log it."""
-    print(f"\n   [PROGRESS] Saving next start number to sheet: {cursor}")
-    sheets_handler.set_start_number(cursor)
-
-
-# -------------------------------------------------------------------
-# PHASE 1 — Re-check Not Found entries
-# -------------------------------------------------------------------
-
-def _run_phase1(cfg: dict) -> list:
-    """
-    Pull up to NOT_FOUND_RECHECK_LIMIT entries from the Not Found sheet
-    and search them using the slot machinery.
-
-    Returns a list of report number strings that were found this time
-    so the caller can remove them from the Not Found sheet.
-    """
-    global _recheck_searched
-
-    not_found_batch = sheets_handler.get_not_found_batch(NOT_FOUND_RECHECK_LIMIT)
-    if not not_found_batch:
-        print("\n[PHASE 1] Not Found sheet is empty — skipping re-check phase.")
-        return []
-
-    accounts        = cfg["accounts"]
-    otp_timeout_min = cfg["otp_timeout_min"]
-    target          = cfg["target"]
-
-    on_found, on_not_found, on_error = _make_callbacks(cfg, phase=1)
-
-    print(f"\n{'#'*60}")
-    print(f"  PHASE 1 — Re-checking {len(not_found_batch)} Not Found entries")
-    print(f"  Target so far: {_found_total}/{target}")
-    print(f"{'#'*60}")
-
-    newly_found_numbers = []
-    active_proxy        = None
-    last_active_slot    = None
-    remaining           = list(not_found_batch)   # copy so we can slice into batches
-
-    # We feed these through the normal slot machinery in BATCH_SIZE chunks
-    while remaining and _found_total < target:
-        if _check_timeout():
-            return newly_found_numbers
-
-        for slot_idx in range(TOTAL_SLOTS):
-            if not remaining:
-                break
-            if _found_total >= target:
-                break
-            if _check_timeout():
-                return newly_found_numbers
-
-            batch = remaining[:BATCH_SIZE]
-
-            print(f"\n{'='*60}")
-            print(f"  [PHASE 1] {_slot_label(slot_idx, accounts)}")
-            print(f"  Re-checking: {batch[0]} -> {batch[-1]}  |  Found: {_found_total}/{target}")
-            print(f"{'='*60}")
-
-            if last_active_slot is not None:
-                _inter_slot_pause(last_active_slot, slot_idx, accounts)
-
-            try:
-                api_session = get_session_for_slot(
-                    slot_idx, accounts, otp_timeout_min,
-                    active_proxy, cfg.get("mailtm_tokens", [])
-                )
-            except Exception as e:
-                err = str(e)
-                if "OTP_TIMEOUT" in err:
-                    lbl      = _slot_label(slot_idx, accounts)
-                    acc      = accounts[slot_idx] if slot_idx < len(accounts) else {}
-                    mailer.send_otp_required(cfg, slot_idx, lbl,
-                                             acc.get("username", ""), acc.get("password", ""))
-                    sheets_handler.save_error(f"OTP_TIMEOUT_SLOT{slot_idx}",
-                                              f"OTP timeout for {lbl}")
-                elif "LOGIN_FAILED" in err:
-                    print(f"\n   [LOGIN FAILED] {_slot_label(slot_idx, accounts)} — skipping")
-                else:
-                    print(f"\n   [SESSION ERROR] {_slot_label(slot_idx, accounts)}: {e}")
-                last_active_slot = slot_idx
-                continue
-
-            # Wrap on_found so we also collect the report number for removal
-            def on_found_phase1(record: dict, _nf_batch=batch):
-                rn = str(record.get("reportNumber", ""))
-                newly_found_numbers.append(rn)
-                on_found(record)
-
-            found_in_slot, _, status = run_slot_batch(
-                slot_idx           = slot_idx,
-                api_session        = api_session,
-                report_numbers     = [int(r) for r in batch],
-                found_callback     = on_found_phase1,
-                not_found_callback = on_not_found,
-                error_callback     = on_error,
-                found_so_far       = _found_total,
-                target             = target,
-            )
-
-            last_active_slot = slot_idx
-            # Remove the processed batch from remaining regardless of status
-            remaining = remaining[len(batch):]
-
-            if status in ("control:stop", "control:restart", "consecutive_errors"):
-                print(f"   [PHASE 1] Stopping early due to status: {status}")
-                return newly_found_numbers
-
-            if status == "limit":
-                _limit_pause(slot_idx, 0, accounts)
-
-        # If we've gone through all slots and there's still remaining,
-        # loop back — the all-slots-limit logic is simpler here since
-        # these are not sequential numbers, just exit phase 1
-        if remaining:
-            print(f"\n[PHASE 1] All slots exhausted. "
-                  f"{len(remaining)} not-found entries left unchecked this run.")
-            break
-
-    print(f"\n[PHASE 1] Complete. "
-          f"Re-checked={_recheck_searched + _recheck_found}, "
-          f"Newly found={_recheck_found}")
-    return newly_found_numbers
-
-
-# -------------------------------------------------------------------
-# PHASE 2 — Sequential fresh search (original _run logic)
-# -------------------------------------------------------------------
-
-def _run_phase2(cfg: dict, start_report: int) -> tuple:
-    """
-    Run the sequential fresh search until target is reached or an
-    exit condition fires.
-
-    Returns (outcome_string, last_cursor) where last_cursor is the
-    next report number to use on the following run.
-    """
-    global _found_total, _searches_done, _not_found_count, _error_count
+def _run(cfg: dict, start_report: int) -> str:
+    global _found_total, _searches_done, _not_found_count, _error_count, _start_time
 
     accounts        = cfg["accounts"]
     target          = cfg["target"]
     otp_timeout_min = cfg["otp_timeout_min"]
 
-    on_found, on_not_found, on_error = _make_callbacks(cfg, phase=2)
+    on_found, on_not_found, on_error = _make_callbacks(cfg)
 
     current_report = start_report
     cycle_num      = 0
-    active_proxy   = None
-    last_cursor    = start_report
+    active_proxy   = None   # starts on direct IP always
 
-    print(f"\n{'#'*60}")
-    print(f"  PHASE 2 — Fresh sequential search")
-    print(f"  Target  : {target} valid reports ({_found_total} already found in Phase 1)")
-    print(f"  Starting: report #{current_report}")
-    print(f"  Accounts: {len(accounts)}")
-    print(f"  Timeout : {_time_remaining_str()} remaining")
-    print(f"{'#'*60}")
+    print(f"\nTarget  : {target} valid reports")
+    print(f"Starting: report #{current_report}")
+    print(f"Accounts: {len(accounts)}")
+    print(f"Proxy   : {'configured (will use if needed)' if cfg.get('residential_proxy') else 'none (direct only)'}")
+    print(f"Alert   : {cfg.get('alert_email') or 'not configured'}")
+    print(f"Timeout : auto-terminate in {_time_remaining_str()}\n")
 
     while _found_total < target:
 
+        # ── Timeout check at top of every cycle ─────────────────────
         if _check_timeout():
-            _save_exit_cursor(current_report)
+            save_progress(current_report)
             mailer.send_crash(cfg,
                               Exception(f"Auto-terminated after {MAX_RUN_HOURS}h"),
                               _found_total, _searches_done, _elapsed())
-            return "timeout", current_report
+            return "timeout"
 
         cycle_num   += 1
         cursor       = current_report
@@ -419,12 +253,13 @@ def _run_phase2(cfg: dict, start_report: int) -> tuple:
 
         for slot_idx in range(TOTAL_SLOTS):
 
+            # Timeout check before each slot
             if _check_timeout():
-                _save_exit_cursor(cursor)
+                save_progress(cursor)
                 mailer.send_crash(cfg,
                                   Exception(f"Auto-terminated after {MAX_RUN_HOURS}h"),
                                   _found_total, _searches_done, _elapsed())
-                return "timeout", cursor
+                return "timeout"
 
             if _found_total >= target:
                 break
@@ -440,6 +275,7 @@ def _run_phase2(cfg: dict, start_report: int) -> tuple:
             if last_active_slot is not None:
                 _inter_slot_pause(last_active_slot, slot_idx, accounts)
 
+            # Acquire session — pass active_proxy (None = direct, URL = proxy)
             try:
                 api_session = get_session_for_slot(
                     slot_idx, accounts, otp_timeout_min,
@@ -476,7 +312,6 @@ def _run_phase2(cfg: dict, start_report: int) -> tuple:
             )
 
             last_active_slot = slot_idx
-            last_cursor      = next_report
 
             print(f"\n   [{_slot_label(slot_idx, accounts)}] Done. "
                   f"Status={status} | Next={next_report} | "
@@ -499,62 +334,40 @@ def _run_phase2(cfg: dict, start_report: int) -> tuple:
                     cfg, str(next_report), "20 consecutive errors",
                     _found_total, _searches_done, _elapsed()
                 )
-                _save_exit_cursor(next_report)
-                return "consecutive_errors", next_report
+                save_progress(next_report)
+                return "consecutive_errors"
 
             elif status == "control:stop":
                 mailer.send_user_stop(cfg, _found_total, _searches_done, _elapsed())
-                _save_exit_cursor(next_report)
-                return "stop", next_report
+                save_progress(next_report)
+                return "stop"
 
             elif status == "control:restart":
                 mailer.send_restart(cfg, _found_total, _searches_done,
                                     _elapsed(), next_report)
-                _save_exit_cursor(next_report)
-                return "restart", next_report
+                save_progress(next_report)
+                return "restart"
 
-            _save_exit_cursor(cursor)
+            save_progress(cursor)
 
             if _found_total >= target:
                 break
 
+        # ── End of cycle ─────────────────────────────────────────────
         if _found_total >= target:
             break
 
         if slots_attempted > 0 and limit_count >= slots_attempted:
+            # All slots hit limit — run proxy switching logic
             active_proxy = _handle_all_slots_limit(cfg, cursor, active_proxy)
         else:
             current_report = cursor
 
-        _save_exit_cursor(current_report)
+        save_progress(current_report)
         print(f"\nCycle #{cycle_num:03d} complete. Next from #{current_report}. "
               f"Found {_found_total}/{target} | IP: {'proxy' if active_proxy else 'direct'}")
 
-    return "done", current_report
-
-
-# -------------------------------------------------------------------
-# FINAL SUMMARY PRINT
-# -------------------------------------------------------------------
-
-def _print_run_summary(target: int):
-    print(f"\n{'='*60}")
-    print(f"  RUN SUMMARY")
-    print(f"{'='*60}")
-    print(f"  Total found       : {_found_total} / {target}")
-    print(f"  Total searches    : {_searches_done}")
-    print(f"  Elapsed           : {mailer._fmt_elapsed(_elapsed())}")
-    print(f"")
-    print(f"  -- Phase 1 (Not Found re-checks) --")
-    print(f"  Entries re-checked: {_recheck_searched + _recheck_found}")
-    print(f"  Newly found       : {_recheck_found}")
-    print(f"")
-    print(f"  -- Phase 2 (Fresh sequential) --")
-    print(f"  Searches done     : {_fresh_searches + _fresh_found}")
-    print(f"  Found             : {_fresh_found}")
-    print(f"  Not found         : {_not_found_count}")
-    print(f"  Errors            : {_error_count}")
-    print(f"{'='*60}")
+    return "done"
 
 
 # -------------------------------------------------------------------
@@ -563,13 +376,10 @@ def _print_run_summary(target: int):
 
 def main():
     global _found_total, _searches_done, _not_found_count, _error_count, _start_time
-    global _recheck_searched, _recheck_found, _fresh_found, _fresh_searches
 
     parser = argparse.ArgumentParser(description="BuyCrash Report Automation")
-    parser.add_argument("--reset", action="store_true",
-                        help="Ignored (progress.txt removed). Kept for CLI compatibility.")
-    parser.add_argument("--start", type=int,
-                        help="Override start report number for Phase 2.")
+    parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--start", type=int)
     args = parser.parse_args()
 
     print("=" * 60)
@@ -579,17 +389,14 @@ def main():
     print("=" * 60)
 
     while True:
-        # Reset all counters on every (re)start
+        # Reset counters on every (re)start
         _found_total      = 0
         _searches_done    = 0
         _not_found_count  = 0
         _error_count      = 0
-        _recheck_searched = 0
-        _recheck_found    = 0
-        _fresh_found      = 0
-        _fresh_searches   = 0
         _start_time       = time.time()
 
+        # Timeout check before doing anything
         if _check_timeout():
             print(f"\n[EXIT] {MAX_RUN_HOURS}h limit reached before cycle could start.")
             break
@@ -605,24 +412,23 @@ def main():
             print("No accounts found in Config sheet. Exiting.")
             return
 
-        # ── Determine Phase 2 start number ───────────────────────────
+        if args.reset:
+            reset_progress()
+
         if args.start:
             start_report = args.start
             print(f"Start override from CLI: {start_report}")
         else:
-            gs_start = sheets_handler.get_start_number()  # reads A2 and clears it
+            gs_start = sheets_handler.get_start_number()
             if gs_start and gs_start > 0:
                 start_report = gs_start
-                print(f"Start from Google Sheet (A2): {start_report}")
+                print(f"Start from Google Sheet: {start_report}")
             else:
-                # Fallback: start from 1 if sheet is empty (first ever run)
-                start_report = 1
-                print(f"No start number in sheet — starting from {start_report}")
+                start_report = load_progress()
+                print(f"Start from progress file: {start_report}")
 
         print(f"\n  Accounts       : {len(cfg['accounts'])}")
         print(f"  Target         : {cfg['target']}")
-        print(f"  Phase 2 start  : {start_report}")
-        print(f"  NF recheck lim : {NOT_FOUND_RECHECK_LIMIT}")
         print(f"  OTP timeout    : {cfg['otp_timeout_min']} min")
         print(f"  Alert email    : {cfg.get('alert_email') or 'not set'}")
         print(f"  Batch size     : {BATCH_SIZE} / slot")
@@ -631,52 +437,31 @@ def main():
         print(f"  Time remaining : {_time_remaining_str()}")
         print()
 
-        outcome      = "crash"
-        last_cursor  = start_report
-
+        outcome = "crash"
         try:
-            # ── PHASE 1: Re-check Not Found list ─────────────────────
-            newly_found_from_nf = _run_phase1(cfg)
-
-            # Remove the ones that turned into Found from Not Found sheet
-            if newly_found_from_nf:
-                print(f"\n[PHASE 1] Removing {len(newly_found_from_nf)} entries "
-                      f"from Not Found sheet...")
-                sheets_handler.remove_from_not_found(newly_found_from_nf)
-
-            # ── PHASE 2: Fresh sequential search ─────────────────────
-            if _found_total < cfg["target"]:
-                outcome, last_cursor = _run_phase2(cfg, start_report)
-            else:
-                print(f"\n[PHASE 2] Skipped — target already reached in Phase 1.")
-                outcome = "done"
-                last_cursor = start_report
-
+            outcome = _run(cfg, start_report)
         except Exception as e:
             print(f"\n[CRASH] Unhandled exception: {e}")
             print(traceback.format_exc())
             mailer.send_crash(cfg, e, _found_total, _searches_done, _elapsed())
-            _save_exit_cursor(last_cursor)
             outcome = "crash"
 
-        # ── Always print the detailed summary ────────────────────────
-        _print_run_summary(cfg["target"])
-
         if outcome == "done":
-            print(f"\n[SUCCESS] {_found_total}/{cfg['target']} reports found")
+            print("\n" + "=" * 60)
+            print(f"  SUCCESS — {_found_total}/{cfg['target']} reports found")
+            print(f"  Time    : {mailer._fmt_elapsed(_elapsed())}")
+            print(f"  Searches: {_searches_done}")
+            print("=" * 60)
             mailer.send_success(
                 cfg, _found_total, cfg["target"],
                 _searches_done, _elapsed(),
                 _not_found_count, _error_count
             )
             get_summary()
-            # On success, save last_cursor so next run continues from here
-            _save_exit_cursor(last_cursor)
             break
 
         elif outcome == "restart":
             print(f"\n[RESTART] Pausing {RESTART_PAUSE_SEC // 60} min then restarting...")
-            # last_cursor already saved inside _run_phase2 on restart signal
             time.sleep(RESTART_PAUSE_SEC)
             args.start = None
             print("[RESTART] Reloading config and starting over...\n")
@@ -684,14 +469,11 @@ def main():
 
         elif outcome == "timeout":
             print(f"\n[EXIT] Auto-terminated after {MAX_RUN_HOURS}h")
-            # last_cursor already saved inside _run_phase2 on timeout
             get_summary()
             break
 
         elif outcome in ("stop", "consecutive_errors", "crash"):
             print(f"\n[EXIT] Reason: {outcome}")
-            # last_cursor already saved for stop/consecutive_errors inside _run_phase2
-            # for crash it's saved in the except block above
             get_summary()
             break
 

@@ -4,13 +4,13 @@ sheets_handler.py
 All Google Sheets operations with auto-reconnect on idle-timeout.
 
 Config tab layout (column A = label, column B = value):
-  B1-B28   Account 1-14 credentials (Username / Password pairs)
-  B29      Target
-  B30      Alert Email
-  B31      Alert Email Password
-  B33      Control  (pause / stop / restart — cleared after reading)
-  B34      Residential Proxy URL  (optional, leave empty = direct connection)
-  B37-B64  Account 1-14 Mail.tm Email + Token pairs
+  B1-B18   Account 1-9 credentials (Username / Password pairs)
+  B19      Target
+  B20      Alert Email
+  B21      Alert Email Password
+  B23      Control  (pause / stop / restart — cleared after reading)
+  B24      Residential Proxy URL  (optional, leave empty = direct connection)
+  B27-B44  Account 1-9 Mail.tm Email + Token pairs
 """
 import time
 import gspread
@@ -125,12 +125,15 @@ def load_config() -> dict:
         from config import OTP_TIMEOUT_MIN
         cfg["otp_timeout_min"] = OTP_TIMEOUT_MIN
 
-        # ── Residential proxy (B34) — single static IP ────────────────
+        # ── Residential proxy (B24) — single static IP ────────────────
+        # Accepts: http://ip:port  |  http://user:pass@ip:port
+        #          socks5://user:pass@ip:port  |  empty = direct
         residential_proxy = cfg.get("residential_proxy", "").strip()
         cfg["residential_proxy"] = residential_proxy or None
+        # Keep cfg["proxies"] as single-element list for backward compat
         cfg["proxies"] = [residential_proxy] if residential_proxy else []
 
-        # ── Mail.tm tokens ────────────────────────────────────────────
+        # ── Mail.tm tokens (B27-B44) ──────────────────────────────────
         mailtm_tokens = []
         mailtm_emails = []
         for i in range(1, NUM_ACCOUNTS + 1):
@@ -141,6 +144,7 @@ def load_config() -> dict:
         cfg["mailtm_emails"] = mailtm_emails
         cfg["mailtm_tokens"] = mailtm_tokens
 
+        # Map site username -> mailtm token for fast lookup in searcher
         cfg["mailtm_by_username"] = {}
         for i, acc in enumerate(accounts):
             if i < len(mailtm_tokens) and mailtm_tokens[i]:
@@ -169,7 +173,7 @@ def load_config() -> dict:
 
 def check_control() -> str:
     """
-    Read B33 (Control cell) from Config tab.
+    Read B11 (Control cell) from Config tab.
     Returns lowercase value if it's pause/stop/restart, else "".
     Clears the cell after reading a recognised command.
     """
@@ -180,7 +184,7 @@ def check_control() -> str:
             return ""
         cmd = str(val).strip().lower()
         if cmd in ("pause", "stop", "restart"):
-            ws.update(CFG_ROW["control"], [[""]])
+            ws.update(CFG_ROW["control"], [[""]])   # clear immediately
             print(f"   [CONTROL] Command received: {cmd.upper()}")
             return cmd
         return ""
@@ -193,55 +197,25 @@ def check_control() -> str:
 
 
 # -------------------------------------------------------------------
-# START NUMBER — read, clear on pickup, write on exit
+# START NUMBER / OTP
 # -------------------------------------------------------------------
 
 def get_start_number() -> int:
-    """
-    Read A2 from Start Number sheet.
-    Immediately clears A2 after reading so it won't be reused on
-    an accidental restart before the script writes the exit cursor.
-    Returns 0 if empty or invalid.
-    """
     def _do():
         ws  = _get_spreadsheet().worksheet(SHEET_START)
         val = ws.acell("A2").value
         if val and str(val).strip().isdigit():
-            num = int(str(val).strip())
-            # Clear immediately after pickup
-            ws.update("A2", [[""]])
-            print(f"   [SHEETS] Start number picked up and cleared: {num}")
-            return num
+            return int(str(val).strip())
         return 0
-
     try:
         num = _with_retry(_do)
+        if num:
+            print(f"   [SHEETS] Start number: {num}")
         return num
     except Exception as e:
         print(f"   [SHEETS] ERROR get_start_number: {e}")
         return 0
 
-
-def set_start_number(n: int):
-    """
-    Write n to A2 of Start Number sheet.
-    Called on every clean or unclean exit so the next run resumes
-    from the right place.
-    """
-    def _do():
-        ws = _get_spreadsheet().worksheet(SHEET_START)
-        ws.update("A2", [[str(n)]])
-        print(f"   [SHEETS] Next start number saved: {n}")
-
-    try:
-        _with_retry(_do)
-    except Exception as e:
-        print(f"   [SHEETS] ERROR set_start_number: {e}")
-
-
-# -------------------------------------------------------------------
-# OTP (still uses B2 on Start Number sheet as fallback)
-# -------------------------------------------------------------------
 
 def get_otp_from_sheet() -> str:
     def _do():
@@ -266,80 +240,6 @@ def clear_otp_from_sheet():
         _with_retry(_do)
     except Exception as e:
         print(f"   [SHEETS] ERROR clear_otp: {e}")
-
-
-# -------------------------------------------------------------------
-# NOT FOUND — batch fetch and selective removal
-# -------------------------------------------------------------------
-
-def get_not_found_batch(limit: int = 100) -> list:
-    """
-    Return up to `limit` report number strings from the Not Found sheet
-    (skips the header row). Returns an empty list on error.
-    """
-    def _do():
-        try:
-            ws = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
-        except gspread.exceptions.WorksheetNotFound:
-            return []
-
-        # Column A = report numbers, row 1 = header
-        all_values = ws.col_values(1)
-        # Skip header
-        report_nums = [v.strip() for v in all_values[1:] if v and v.strip()]
-        # Filter out ERROR: prefixed entries — those are real errors, not re-check candidates
-        report_nums = [r for r in report_nums if not r.startswith("ERROR:")]
-        batch = report_nums[:limit]
-        print(f"   [SHEETS] Not Found batch: {len(batch)} of {len(report_nums)} total")
-        return batch
-
-    try:
-        return _with_retry(_do)
-    except Exception as e:
-        print(f"   [SHEETS] ERROR get_not_found_batch: {e}")
-        return []
-
-
-def remove_from_not_found(report_numbers: list):
-    """
-    Delete rows from the Not Found sheet whose report number (col A)
-    is in `report_numbers`. Only removes entries that are now Found.
-    Processes deletions bottom-up to preserve row indices.
-    """
-    if not report_numbers:
-        return
-
-    target_set = set(str(r).strip() for r in report_numbers)
-
-    def _do():
-        try:
-            ws = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
-        except gspread.exceptions.WorksheetNotFound:
-            return
-
-        all_values = ws.col_values(1)
-        # Find row indices (1-based) to delete — skip header row 1
-        rows_to_delete = []
-        for row_idx, val in enumerate(all_values, start=1):
-            if row_idx == 1:
-                continue  # skip header
-            if val and val.strip() in target_set:
-                rows_to_delete.append(row_idx)
-
-        if not rows_to_delete:
-            print(f"   [SHEETS] remove_from_not_found: no matching rows found")
-            return
-
-        # Delete bottom-up so row indices stay valid
-        for row_idx in reversed(rows_to_delete):
-            ws.delete_rows(row_idx)
-
-        print(f"   [SHEETS] Removed {len(rows_to_delete)} entries from Not Found sheet")
-
-    try:
-        _with_retry(_do)
-    except Exception as e:
-        print(f"   [SHEETS] ERROR remove_from_not_found: {e}")
 
 
 # -------------------------------------------------------------------
@@ -383,8 +283,7 @@ def save_error(report_number: str, error_message: str):
         print(f"   [SHEETS] ERROR save_error: {e}")
 
 
-def save_created_account(email: str, email_pass: str, portal_user: str, portal_pass: str,
-                         address: str, first_name: str, last_name: str):
+def save_created_account(email: str, email_pass: str, portal_user: str, portal_pass: str, address: str, first_name: str, last_name: str):
     def _do():
         ws = _get_or_create_worksheet("Credentials", [
             "Account Date", "Email Username", "Email Password",
