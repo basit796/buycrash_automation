@@ -16,6 +16,10 @@ load_dotenv()
 CAPTCHA_API_KEY  = os.getenv("CAPTCHA_API_KEY", "")
 SPREADSHEET_ID   = os.getenv("SPREADSHEET_ID", "1kn5uju5c2yh4PHHFAQDm-SRK3vDhCeEjLfdgDkFPZP8")
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE", "google_credentials.json")
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 # ===================================================================
 # CAPTCHA — site key fallback (live key extracted from page at runtime)
@@ -196,3 +200,30 @@ def get_report_type_label(code: str) -> str:
 # ===================================================================
 OUTPUT_FILE   = "crash_reports.xlsx"
 PROGRESS_FILE = "progress.txt"
+
+# Recheck accounts — 12 accounts, 4 rows each starting at B67
+RECHECK_NUM_ACCOUNTS = 12
+RECHECK_BATCH_SIZE   = 15      # same as normal BATCH_SIZE
+ 
+# Sheet names
+SHEET_RECHECK_FOUND  = "ReCheck Found"   # new sheet for recheck hits
+# SHEET_NOT_FOUND, SHEET_START, SHEET_CONFIG already defined above
+ 
+# Config sheet cell references for recheck
+# (These are already in CFG_ROW format for convenience)
+RECHECK_CFG = {
+    "daily_limit": "B66",
+    "proxy":       "B34",   # shared with normal search
+    "control":     "B33",   # shared with normal search
+    "alert_email": "B30",   # shared with normal search
+    "alert_pass":  "B31",   # shared with normal search
+}
+ 
+# Account block starts at row 67, 4 rows per account:
+#   B(67 + i*4 + 0) = username
+#   B(67 + i*4 + 1) = password
+#   B(67 + i*4 + 2) = mailtm email
+#   B(67 + i*4 + 3) = mailtm token
+# Last account (12th) ends at B114.
+RECHECK_ACCOUNT_BASE_ROW = 67
+# ==================================================

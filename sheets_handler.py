@@ -20,13 +20,9 @@ from datetime import datetime
 from config import (
     SPREADSHEET_ID, CREDENTIALS_FILE, CFG_ROW,
     SHEET_FOUND, SHEET_NOT_FOUND, SHEET_ERRORS,
-    SHEET_START, SHEET_CONFIG, NUM_ACCOUNTS,
+    SHEET_START, SHEET_CONFIG, NUM_ACCOUNTS, SCOPES,
+    SHEET_RECHECK_FOUND, RECHECK_NUM_ACCOUNTS, OTP_TIMEOUT_MIN
 )
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
 _MAX_RETRIES   = 3
 _RETRY_BACKOFF = [5, 15, 30]
@@ -122,7 +118,6 @@ def load_config() -> dict:
         cfg["target"]   = int(cfg.get("target", "100") or "100")
 
         # ── OTP timeout (hardcoded) ───────────────────────────────────
-        from config import OTP_TIMEOUT_MIN
         cfg["otp_timeout_min"] = OTP_TIMEOUT_MIN
 
         # ── Residential proxy (B24) — single static IP ────────────────
@@ -157,7 +152,6 @@ def load_config() -> dict:
         return cfg
     except Exception as e:
         print(f"   [SHEETS] ERROR loading config: {e}")
-        from config import OTP_TIMEOUT_MIN
         empty_tokens = [""] * NUM_ACCOUNTS
         return {"accounts": [], "target": 100, "otp_timeout_min": OTP_TIMEOUT_MIN,
                 "alert_email": "", "alert_password": "", "control": "",
@@ -330,3 +324,238 @@ def test_connection() -> bool:
     except Exception as e:
         print(f"   [SHEETS] FAILED: {e}")
         return False
+
+"""
+sheets_handler_recheck.py
+-------------------------
+Recheck-specific Google Sheets functions.
+Paste these into sheets_handler.py alongside the existing functions.
+ 
+Config sheet layout for recheck:
+  B66      : daily search limit (default 200)
+  B67-B70  : Account 1  (username, password, mailtm_email, mailtm_token)
+  B71-B74  : Account 2
+  ...
+  B111-B114: Account 12
+ 
+  B33      : control cell  (shared with normal search)
+  B34      : residential proxy URL  (shared with normal search)
+  B30      : alert email  (shared)
+  B31      : alert email password  (shared)
+ 
+Start Number sheet:
+  B2       : recheck cursor (next report number to check)
+ 
+Sheets:
+  "Not Found"     : column A = report numbers  (row 1 = header)
+  "ReCheck Found" : columns = Report Number, DOI, Date Rechecked
+"""
+
+BASE_ROW = 67   # B67 = first account username
+
+def load_recheck_config() -> dict:
+    """
+    Reads recheck-specific values from the Config sheet.
+    Returns a dict with keys:
+      recheck_daily_limit, recheck_accounts, recheck_mailtm_tokens,
+      recheck_mailtm_emails, recheck_proxy
+    Designed to be merged into the main cfg dict.
+    """
+ 
+    def _do():
+        ws = _get_spreadsheet().worksheet(SHEET_CONFIG)
+ 
+        # B66 — daily limit
+        try:
+            val = ws.acell("B66").value
+            daily_limit = int(str(val).strip()) if val and str(val).strip().isdigit() else 200
+        except Exception:
+            daily_limit = 200
+ 
+        # B34 — shared proxy (same cell as normal search)
+        try:
+            proxy_val = ws.acell("B34").value
+            recheck_proxy = str(proxy_val).strip() if proxy_val else None
+        except Exception:
+            recheck_proxy = None
+ 
+        # B67-B114 — 12 accounts, 4 rows each
+        # Row offsets per account: +0=username, +1=password, +2=email, +3=token
+        accounts        = []
+        mailtm_tokens   = []
+        mailtm_emails   = []
+ 
+        for i in range(RECHECK_NUM_ACCOUNTS):
+            row_u = BASE_ROW + (i * 4)       # username
+            row_p = BASE_ROW + (i * 4) + 1   # password
+            row_e = BASE_ROW + (i * 4) + 2   # mailtm email
+            row_t = BASE_ROW + (i * 4) + 3   # mailtm token
+ 
+            def _cell(row):
+                try:
+                    v = ws.acell(f"B{row}").value
+                    return str(v).strip() if v else ""
+                except Exception:
+                    return ""
+ 
+            username = _cell(row_u)
+            password = _cell(row_p)
+            email    = _cell(row_e)
+            token    = _cell(row_t)
+ 
+            if username:
+                accounts.append({"username": username, "password": password})
+            mailtm_emails.append(email)
+            mailtm_tokens.append(token)
+ 
+        return {
+            "recheck_daily_limit"  : daily_limit,
+            "recheck_accounts"     : accounts,
+            "recheck_mailtm_tokens": mailtm_tokens,
+            "recheck_mailtm_emails": mailtm_emails,
+            "recheck_proxy"        : recheck_proxy or None,
+        }
+ 
+    try:
+        result = _with_retry(_do)
+        print(f"   [SHEETS] Recheck config: {len(result['recheck_accounts'])} accounts, "
+              f"limit={result['recheck_daily_limit']}, "
+              f"proxy={'set' if result['recheck_proxy'] else 'none'}")
+        return result
+    except Exception as e:
+        print(f"   [SHEETS] ERROR load_recheck_config: {e}")
+        empty = [""] * RECHECK_NUM_ACCOUNTS
+        return {
+            "recheck_daily_limit"  : 200,
+            "recheck_accounts"     : [],
+            "recheck_mailtm_tokens": empty,
+            "recheck_mailtm_emails": empty,
+            "recheck_proxy"        : None,
+        }
+ 
+ 
+# -------------------------------------------------------------------
+# NOT FOUND LIST — load all report numbers
+# -------------------------------------------------------------------
+ 
+def load_not_found_list() -> list:
+    """
+    Returns a list of report number strings from the Not Found sheet.
+    Row 1 is assumed to be the header — skipped.
+    Empty cells are ignored.
+    """
+ 
+    def _do():
+        ws   = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
+        rows = ws.col_values(1)   # column A, all rows
+        # Skip header (row 1), filter empty
+        numbers = [str(r).strip() for r in rows[1:] if str(r).strip()]
+        return numbers
+ 
+    try:
+        numbers = _with_retry(_do)
+        print(f"   [SHEETS] Not Found list loaded: {len(numbers)} entries")
+        return numbers
+    except Exception as e:
+        print(f"   [SHEETS] ERROR load_not_found_list: {e}")
+        return []
+ 
+ 
+# -------------------------------------------------------------------
+# REMOVE FROM NOT FOUND (deletes row, everything below shifts up)
+# -------------------------------------------------------------------
+ 
+def remove_from_not_found(report_number: str):
+    """
+    Find report_number in column A of Not Found sheet and delete that row.
+    gspread delete_rows() shifts all rows below upward automatically.
+    """
+ 
+    def _do():
+        ws   = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
+        rows = ws.col_values(1)   # column A
+ 
+        for idx, val in enumerate(rows):
+            if str(val).strip() == str(report_number).strip():
+                row_num = idx + 1   # gspread is 1-indexed
+                ws.delete_rows(row_num)
+                print(f"   [SHEETS] Removed from Not Found (row {row_num}): {report_number}")
+                return True
+ 
+        print(f"   [SHEETS] Not Found: {report_number} not found in sheet (already removed?)")
+        return False
+ 
+    try:
+        _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR remove_from_not_found {report_number}: {e}")
+ 
+ 
+# -------------------------------------------------------------------
+# RECHECK FOUND — save newly confirmed entries
+# -------------------------------------------------------------------
+ 
+def save_recheck_found(report_number: str, date_of_incident: str):
+    """
+    Append to the ReCheck Found sheet.
+    Creates the sheet with headers if it doesn't exist yet.
+    """
+ 
+    def _do():
+        ws = _get_or_create_worksheet(
+            SHEET_RECHECK_FOUND,
+            ["Report Number #", "DOI (Date of Incident)", "Date Rechecked"]
+        )
+        ws.append_row(
+            [report_number, date_of_incident,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            value_input_option="USER_ENTERED"
+        )
+        print(f"   [SHEETS] ReCheck FOUND: {report_number} | {date_of_incident}")
+ 
+    try:
+        _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR save_recheck_found: {e}")
+ 
+ 
+# -------------------------------------------------------------------
+# RECHECK CURSOR — read / write B2 in Start Number sheet
+# -------------------------------------------------------------------
+ 
+def get_recheck_cursor() -> str:
+    """
+    Read B2 in Start Number sheet.
+    Returns the report number string, or None if empty/invalid.
+    """ 
+    def _do():
+        ws  = _get_spreadsheet().worksheet(SHEET_START)
+        val = ws.acell("B2").value
+        if val and str(val).strip():
+            return str(val).strip()
+        return None
+ 
+    try:
+        cursor = _with_retry(_do)
+        if cursor:
+            print(f"   [SHEETS] Recheck cursor: {cursor}")
+        return cursor
+    except Exception as e:
+        print(f"   [SHEETS] ERROR get_recheck_cursor: {e}")
+        return None
+ 
+ 
+def save_recheck_cursor(next_report_number):
+    """
+    Write next_report_number to B2 in Start Number sheet.
+    """
+ 
+    def _do():
+        ws = _get_spreadsheet().worksheet(SHEET_START)
+        ws.update("B2", [[str(next_report_number)]])
+        print(f"   [SHEETS] Recheck cursor saved: {next_report_number}")
+ 
+    try:
+        _with_retry(_do)
+    except Exception as e:
+        print(f"   [SHEETS] ERROR save_recheck_cursor: {e}")

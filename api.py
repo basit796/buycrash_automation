@@ -244,6 +244,137 @@ def create_accounts_status(x_api_key: str = Header(default="")):
     with _creator_lock:
         return dict(_creator_state)
 
+"""
+recheck additions
+"""
+
+_recheck_state = {
+    "status"       : "idle",      # idle | running | stopped | error
+    "started_at"   : None,
+    "stopped_at"   : None,
+    "exit_code"    : None,
+    "found_count"  : 0,
+    "searches_done": 0,
+    "log_tail"     : [],
+}
+_recheck_lock   = threading.Lock()
+_recheck_thread = None
+
+
+def _run_recheck_thread():
+    """Background thread that runs the full recheck cycle."""
+    import sheets_handler
+    import recheck_runner
+
+    log_lines = []
+
+    def _capture(msg: str):
+        print(msg)
+        with _recheck_lock:
+            log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            if len(log_lines) > 100:
+                log_lines.pop(0)
+            _recheck_state["log_tail"] = list(log_lines)
+
+    _capture("Loading config for recheck...")
+    try:
+        cfg = sheets_handler.load_config()
+        cfg.update(sheets_handler.load_recheck_config())
+    except Exception as e:
+        _capture(f"Config load failed: {e}")
+        with _recheck_lock:
+            _recheck_state["status"]     = "error"
+            _recheck_state["stopped_at"] = datetime.now().isoformat()
+        return
+
+    _capture(f"Starting recheck — {len(cfg.get('recheck_accounts', []))} accounts, "
+             f"limit={cfg.get('recheck_daily_limit', 200)}")
+
+    try:
+        outcome = recheck_runner.run_recheck(cfg)
+    except Exception as e:
+        _capture(f"Recheck crashed: {e}")
+        outcome = "crash"
+
+    with _recheck_lock:
+        _recheck_state["status"]        = "stopped" if outcome == "done" else outcome
+        _recheck_state["stopped_at"]    = datetime.now().isoformat()
+        _recheck_state["found_count"]   = recheck_runner._found_count
+        _recheck_state["searches_done"] = recheck_runner._searches_done
+
+    _capture(f"Recheck finished: {outcome} | "
+             f"found={recheck_runner._found_count} | "
+             f"searched={recheck_runner._searches_done}")
+
+
+# ── 3. Add these endpoints to api.py ─────────────────────────────
+
+# POST /recheck/start
+@app.post("/recheck/start", tags=["Recheck"], summary="Start the daily Not Found recheck")
+def recheck_start(x_api_key: str = Header(default="")):
+    _auth(x_api_key)
+
+    with _lock:
+        if _state["status"] == "running":
+            raise HTTPException(
+                status_code=400,
+                detail="Normal search is currently running — stop it first"
+            )
+
+    with _recheck_lock:
+        if _recheck_state["status"] == "running":
+            raise HTTPException(status_code=400, detail="Recheck is already running")
+        _recheck_state.update(
+            status       = "running",
+            started_at   = datetime.now().isoformat(),
+            stopped_at   = None,
+            exit_code    = None,
+            found_count  = 0,
+            searches_done= 0,
+            log_tail     = [],
+        )
+
+    t = threading.Thread(target=_run_recheck_thread, daemon=True)
+    t.start()
+
+    return {
+        "message"   : "Recheck started",
+        "started_at": _recheck_state["started_at"],
+    }
+
+
+# POST /recheck/stop
+@app.post("/recheck/stop", tags=["Recheck"], summary="Stop the recheck cleanly via control cell")
+def recheck_stop(x_api_key: str = Header(default="")):
+    _auth(x_api_key)
+
+    with _recheck_lock:
+        if _recheck_state["status"] != "running":
+            raise HTTPException(status_code=400, detail="Recheck is not running")
+
+    # Write stop command to the shared control cell B33
+    _write_control("stop")
+
+    return {"message": "Stop command sent to recheck (via control cell B33)"}
+
+
+# GET /recheck/status
+@app.get("/recheck/status", tags=["Recheck"],
+         summary="Current recheck status, progress, and last 100 log lines")
+def recheck_status(x_api_key: str = Header(default="")):
+    _auth(x_api_key)
+
+    with _recheck_lock:
+        s = dict(_recheck_state)
+
+    if s["status"] == "running" and s["started_at"]:
+        sec = (datetime.now() - datetime.fromisoformat(s["started_at"])).total_seconds()
+        h, r = divmod(int(sec), 3600)
+        m, sc = divmod(r, 60)
+        s["uptime"] = f"{h}h {m}m {sc}s"
+
+    return s
+
 
 if __name__ == "__main__":
     import uvicorn

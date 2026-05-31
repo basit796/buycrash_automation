@@ -32,6 +32,7 @@ from config import (
 from progress import load_progress, save_progress, reset_progress
 from excel_handler import save_found_report, save_not_found_report, get_summary
 from searcher import get_session_for_slot, run_slot_batch
+import recheck_runner
 
 # ===================================================================
 # AUTO-TERMINATE AFTER 12 HOURS
@@ -511,6 +512,22 @@ def main():
                 _not_found_count, _error_count
             )
             get_summary()
+ 
+            # ── Auto-trigger recheck after normal search ──────────
+            print("\n" + "=" * 60)
+            print("  NORMAL SEARCH DONE — starting Not Found recheck...")
+            print("=" * 60)
+            try:
+                # Merge recheck config into cfg
+                cfg.update(sheets_handler.load_recheck_config())
+                recheck_outcome = recheck_runner.run_recheck(cfg)
+                print(f"\n[RECHECK] Finished with outcome: {recheck_outcome}")
+            except Exception as e:
+                print(f"\n[RECHECK] Crashed: {e}")
+                import traceback
+                print(traceback.format_exc())
+            # ──────────────────────────────────────────────────────
+ 
             break
 
         elif outcome == "restart":

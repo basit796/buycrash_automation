@@ -223,3 +223,35 @@ def _fmt_elapsed(seconds: float) -> str:
     if m:
         return f"{m}m {s}s"
     return f"{s}s"
+
+"""
+They reuse _send() and _fmt_elapsed() already defined there.
+"""
+
+def send_recheck_success(cfg: dict, found: int, searched: int,
+                         errors: int, elapsed_sec: float,
+                         note: str = ""):
+    subject = f"[BuyCrash Recheck] Done — {found} new found / {searched} searched"
+    body = (
+        f"Daily recheck completed.\n\n"
+        f"  Searched  : {searched}\n"
+        f"  Found     : {found}\n"
+        f"  Errors    : {errors}\n"
+        f"  Time      : {_fmt_elapsed(elapsed_sec)}\n"
+    )
+    if note:
+        body += f"\n  Note: {note}\n"
+    _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
+
+
+def send_recheck_error(cfg: dict, reason: str, found: int,
+                       searched: int, elapsed_sec: float):
+    subject = f"[BuyCrash Recheck] ERROR — {reason[:60]}"
+    body = (
+        f"Recheck stopped with error.\n\n"
+        f"  Reason    : {reason}\n"
+        f"  Searched  : {searched}\n"
+        f"  Found     : {found}\n"
+        f"  Time      : {_fmt_elapsed(elapsed_sec)}\n"
+    )
+    _send(cfg.get("alert_email", ""), cfg.get("alert_password", ""), subject, body)
