@@ -182,9 +182,10 @@ def run_recheck(cfg: dict = None) -> str:
     counters = {"searches": 0, "found": 0, "errors": 0}
 
     # ── Load config ───────────────────────────────────────────────
+    # load_recheck_config() is self-contained — reads B30/B31/B34/B66-B114
+    # directly. No need to call load_config() (normal search rows) here.
     if cfg is None:
-        cfg = sheets_handler.load_config()
-        cfg.update(sheets_handler.load_recheck_config())
+        cfg = sheets_handler.load_recheck_config()
 
     accounts        = cfg.get("recheck_accounts", [])
     daily_limit     = cfg.get("recheck_daily_limit", 200)

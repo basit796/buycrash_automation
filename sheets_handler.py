@@ -4,20 +4,16 @@ sheets_handler.py
 All Google Sheets operations with auto-reconnect on idle-timeout.
 
 Config tab layout (column A = label, column B = value):
-  B1-B18   Account 1-9 credentials (Username / Password pairs)
-  B19      Target
-  B20      Alert Email
-  B21      Alert Email Password
-  B23      Control  (pause / stop / restart — cleared after reading)
-  B24      Residential Proxy URL  (optional, leave empty = direct connection)
-  B27-B44  Account 1-9 Mail.tm Email + Token pairs
+  B1-B28   Account 1-14 credentials (Username / Password pairs, 2 rows each)
+  B29      Target
+  B30      Alert Email
+  B31      Alert Email Password
+  B33      Control  (pause / stop / restart — cleared after reading)
+  B34      Residential Proxy URL  (optional, leave empty = direct connection)
+  B37-B64  Account 1-14 Mail.tm Email + Token pairs (2 rows each)
 
-Recheck layout (column B):
-  B66      Daily recheck search limit (default 200)
-  B67-B70  Recheck Account 1  (username, password, mailtm_email, mailtm_token)
-  B71-B74  Recheck Account 2
-  ...
-  B111-B114 Recheck Account 12
+  B66      Recheck daily search limit
+  B67-B114 Recheck Accounts 1-12 (4 rows each: user, pass, mailtm_email, mailtm_token)
 
 Start Number sheet:
   A2       Normal search cursor (next report number)
@@ -97,14 +93,14 @@ def _get_or_create_worksheet(name: str, headers: list):
 
 
 # ===================================================================
-# CONFIG TAB — read all settings at once
+# CONFIG TAB — read all settings at once (NORMAL SEARCH ONLY)
 # ===================================================================
 
 def load_config() -> dict:
     """
-    Read all values from the Config tab and return a dict.
-    Called once at startup and again on restart.
-    Falls back to empty strings for missing values.
+    Read normal-search settings from the Config tab.
+    Accounts B1-B28, settings B29-B34, Mail.tm B37-B64.
+    Does NOT read recheck rows (B66+).
     """
     def _do():
         ws     = _get_spreadsheet().worksheet(SHEET_CONFIG)
@@ -133,12 +129,12 @@ def load_config() -> dict:
         # ── OTP timeout (hardcoded) ───────────────────────────────────
         cfg["otp_timeout_min"] = OTP_TIMEOUT_MIN
 
-        # ── Residential proxy (B24) ───────────────────────────────────
+        # ── Residential proxy (B34) ───────────────────────────────────
         residential_proxy        = cfg.get("residential_proxy", "").strip()
         cfg["residential_proxy"] = residential_proxy or None
         cfg["proxies"]           = [residential_proxy] if residential_proxy else []
 
-        # ── Mail.tm tokens (B27-B44) ──────────────────────────────────
+        # ── Mail.tm tokens (B37-B64) ──────────────────────────────────
         mailtm_tokens = []
         mailtm_emails = []
         for i in range(1, NUM_ACCOUNTS + 1):
@@ -175,12 +171,12 @@ def load_config() -> dict:
 
 
 # ===================================================================
-# CONTROL CELL — checked after every search
+# CONTROL CELL — checked after every search (shared by both modes)
 # ===================================================================
 
 def check_control() -> str:
     """
-    Read control cell from Config tab.
+    Read B33 (Control cell) from Config tab.
     Returns lowercase value if it's pause/stop/restart, else "".
     Clears the cell after reading a recognised command.
     """
@@ -204,7 +200,7 @@ def check_control() -> str:
 
 
 # ===================================================================
-# START NUMBER / OTP
+# START NUMBER / OTP  (normal search)
 # ===================================================================
 
 def get_start_number() -> int:
@@ -226,10 +222,7 @@ def get_start_number() -> int:
 
 
 def save_progress_to_sheet(next_number: int):
-    """
-    Write next_number into the Start Number sheet at A2.
-    Called after every report and on any exit path.
-    """
+    """Write next_number into A2 of the Start Number sheet."""
     def _do():
         ws = _get_spreadsheet().worksheet(SHEET_START)
         ws.update("A2", [[str(next_number)]])
@@ -270,7 +263,7 @@ def clear_otp_from_sheet():
 
 
 # ===================================================================
-# WRITE RESULTS
+# WRITE RESULTS  (normal search)
 # ===================================================================
 
 def save_found(report_number: str, date_of_incident: str):
@@ -353,61 +346,68 @@ def test_connection() -> bool:
 
 
 # ===================================================================
-# RECHECK FUNCTIONS
+# RECHECK CONFIG — reads ONLY recheck rows, completely independent
 # ===================================================================
 
 def load_recheck_config() -> dict:
     """
-    Reads recheck accounts and settings from Config sheet.
+    Reads ONLY recheck-specific values from the Config sheet.
+    Does NOT touch normal-search rows (B1-B64).
 
-    Layout:
-      B66       = daily search limit
-      B67       = account1 username
-      B68       = account1 password
-      B69       = account1 mailtm email
-      B70       = account1 mailtm token
-      B71-B74   = account2 (same pattern)
-      ...
-      B111-B114 = account12
+    Layout read:
+      B30  = alert email        (shared cell, needed for mailer)
+      B31  = alert password     (shared cell, needed for mailer)
+      B34  = proxy URL          (shared cell)
+      B66  = daily search limit
+      B67  = recheck account1 username
+      B68  = recheck account1 password
+      B69  = recheck account1 mailtm email
+      B70  = recheck account1 mailtm token
+      B71-B74 = account2 ... up to B111-B114 = account12
 
     Returns dict with keys:
-      recheck_daily_limit, recheck_accounts,
-      recheck_mailtm_tokens, recheck_mailtm_emails, recheck_proxy
+      alert_email, alert_password,
+      recheck_proxy, recheck_daily_limit,
+      recheck_accounts, recheck_mailtm_tokens, recheck_mailtm_emails,
+      otp_timeout_min
     """
     def _do():
         ws = _get_spreadsheet().worksheet(SHEET_CONFIG)
 
-        # Read ALL column B values in one API call — avoids closure bug
-        # and is much faster than individual acell() calls in a loop
-        last_row  = RECHECK_ACCOUNT_BASE_ROW + (RECHECK_NUM_ACCOUNTS * 4) - 1
-        all_b     = ws.col_values(2)   # column B, 0-indexed list
+        # ── Read column B in ONE call up to row 114 ──────────────────
+        # We request exactly the range we need so col_values truncation
+        # at the last non-empty cell can never drop our recheck rows.
+        # get_values returns a list-of-lists; we flatten to a simple list.
+        raw = ws.get("B1:B114")   # [[val], [val], ...] or [[]] for empty rows
+        # Flatten: raw[i] is either ["value"] or []
+        all_b = []
+        for row_data in raw:
+            all_b.append(str(row_data[0]).strip() if row_data else "")
+        # Pad to at least 114 entries in case sheet is shorter
+        while len(all_b) < 114:
+            all_b.append("")
 
         def _cell(row):
-            """Get value at 1-indexed row N of column B. Returns '' if missing."""
-            idx = row - 1
-            if idx < len(all_b):
-                v = all_b[idx]
-                return str(v).strip() if v else ""
-            return ""
+            """1-indexed row → value string (empty string if missing)."""
+            return all_b[row - 1]
 
-        # B66 — daily limit
-        try:
-            raw         = _cell(66)
-            daily_limit = int(raw) if raw.isdigit() else 200
-        except Exception:
-            daily_limit = 200
+        # ── Shared cells ──────────────────────────────────────────────
+        alert_email    = _cell(30)
+        alert_password = _cell(31)
+        proxy_val      = _cell(34)
+        recheck_proxy  = proxy_val if proxy_val else None
 
-        # B34 — proxy (shared with normal search)
-        proxy_val     = _cell(34)
-        recheck_proxy = proxy_val if proxy_val else None
+        # ── B66 daily limit ───────────────────────────────────────────
+        raw_limit   = _cell(66)
+        daily_limit = int(raw_limit) if raw_limit.isdigit() else 200
 
-        # B67-B114 — 12 accounts, 4 rows each
+        # ── B67-B114 — 12 accounts, 4 rows each ──────────────────────
         accounts      = []
         mailtm_tokens = []
         mailtm_emails = []
 
         for i in range(RECHECK_NUM_ACCOUNTS):
-            base     = RECHECK_ACCOUNT_BASE_ROW + (i * 4)
+            base     = RECHECK_ACCOUNT_BASE_ROW + (i * 4)  # 67, 71, 75 ...
             username = _cell(base)
             password = _cell(base + 1)
             email    = _cell(base + 2)
@@ -419,38 +419,53 @@ def load_recheck_config() -> dict:
             mailtm_tokens.append(token)
 
         return {
+            # needed by mailer even when called standalone
+            "alert_email"          : alert_email,
+            "alert_password"       : alert_password,
+            "otp_timeout_min"      : OTP_TIMEOUT_MIN,
+            # recheck-specific
+            "recheck_proxy"        : recheck_proxy,
             "recheck_daily_limit"  : daily_limit,
             "recheck_accounts"     : accounts,
             "recheck_mailtm_tokens": mailtm_tokens,
             "recheck_mailtm_emails": mailtm_emails,
-            "recheck_proxy"        : recheck_proxy,
         }
 
     try:
         result = _with_retry(_do)
+        proxy_host = (result["recheck_proxy"].split("@")[-1]
+                      if result["recheck_proxy"] and "@" in result["recheck_proxy"]
+                      else result["recheck_proxy"] or "none")
         print(f"   [SHEETS] Recheck config loaded: "
               f"{len(result['recheck_accounts'])} accounts, "
               f"limit={result['recheck_daily_limit']}, "
-              f"proxy={'set' if result['recheck_proxy'] else 'none'}, "
-              f"mailtm={sum(1 for t in result['recheck_mailtm_tokens'] if t)} tokens")
+              f"proxy={proxy_host}, "
+              f"mailtm={sum(1 for t in result['recheck_mailtm_tokens'] if t)} tokens, "
+              f"alert={'set' if result['alert_email'] else 'not set'}")
         return result
     except Exception as e:
         print(f"   [SHEETS] ERROR load_recheck_config: {e}")
         empty = [""] * RECHECK_NUM_ACCOUNTS
         return {
+            "alert_email"          : "",
+            "alert_password"       : "",
+            "otp_timeout_min"      : OTP_TIMEOUT_MIN,
+            "recheck_proxy"        : None,
             "recheck_daily_limit"  : 200,
             "recheck_accounts"     : [],
             "recheck_mailtm_tokens": empty,
             "recheck_mailtm_emails": empty,
-            "recheck_proxy"        : None,
         }
 
+
+# ===================================================================
+# NOT FOUND LIST
+# ===================================================================
 
 def load_not_found_list() -> list:
     """
     Returns list of report number strings from the Not Found sheet.
     Skips row 1 (header). Ignores empty cells.
-    Only reads column A (report numbers).
     """
     def _do():
         ws   = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
@@ -469,12 +484,11 @@ def load_not_found_list() -> list:
 def remove_from_not_found(report_number: str):
     """
     Find report_number in column A of Not Found sheet and delete that row.
-    gspread delete_rows() shifts everything below upward automatically.
     Skips row 1 (header) — will never delete it.
     """
     def _do():
         ws   = _get_spreadsheet().worksheet(SHEET_NOT_FOUND)
-        rows = ws.col_values(1)   # column A, all rows
+        rows = ws.col_values(1)
 
         for idx, val in enumerate(rows):
             if str(val).strip() == str(report_number).strip():
@@ -495,6 +509,10 @@ def remove_from_not_found(report_number: str):
         print(f"   [SHEETS] ERROR remove_from_not_found {report_number}: {e}")
 
 
+# ===================================================================
+# RECHECK RESULTS
+# ===================================================================
+
 def save_recheck_found(report_number: str, date_of_incident: str):
     """Append to ReCheck Found sheet. Creates it with headers if needed."""
     def _do():
@@ -514,6 +532,10 @@ def save_recheck_found(report_number: str, date_of_incident: str):
     except Exception as e:
         print(f"   [SHEETS] ERROR save_recheck_found: {e}")
 
+
+# ===================================================================
+# RECHECK CURSOR  (B2 in Start Number sheet)
+# ===================================================================
 
 def get_recheck_cursor() -> str:
     """Read B2 from Start Number sheet. Returns report number string or None."""

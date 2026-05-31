@@ -518,15 +518,11 @@ def main():
             print("  NORMAL SEARCH DONE — starting Not Found recheck...")
             print("=" * 60)
             try:
-                # Merge recheck config into cfg
-                cfg.update(sheets_handler.load_recheck_config())
                 recheck_outcome = recheck_runner.run_recheck(cfg)
                 print(f"\n[RECHECK] Finished with outcome: {recheck_outcome}")
             except Exception as e:
                 print(f"\n[RECHECK] Crashed: {e}")
-                import traceback
                 print(traceback.format_exc())
-            # ──────────────────────────────────────────────────────
  
             break
 
