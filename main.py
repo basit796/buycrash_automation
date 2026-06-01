@@ -518,7 +518,13 @@ def main():
             print("  NORMAL SEARCH DONE — starting Not Found recheck...")
             print("=" * 60)
             try:
-                recheck_outcome = recheck_runner.run_recheck(cfg)
+                # Pass cfg=None so run_recheck loads its own recheck config
+                # from the sheet (B66-B114). The normal-search cfg does not
+                # contain recheck_accounts / recheck_proxy / recheck_daily_limit,
+                # which would cause the "No recheck accounts configured" skip.
+                print("   [RECHECK] Loading recheck config from sheet...")
+                recheck_cfg = sheets_handler.load_recheck_config()
+                recheck_outcome = recheck_runner.run_recheck(recheck_cfg)
                 print(f"\n[RECHECK] Finished with outcome: {recheck_outcome}")
             except Exception as e:
                 print(f"\n[RECHECK] Crashed: {e}")
