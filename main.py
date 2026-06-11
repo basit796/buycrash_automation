@@ -113,7 +113,7 @@ def _make_callbacks(cfg: dict):
         global _found_total, _searches_done
         _found_total   += 1
         _searches_done += 1
-        save_found_report(record)
+        # save_found_report(record)
         rn = str(record.get("reportNumber", ""))
         sheets_handler.save_found(
             report_number    = rn,
@@ -129,7 +129,7 @@ def _make_callbacks(cfg: dict):
         global _searches_done, _not_found_count
         _searches_done   += 1
         _not_found_count += 1
-        save_not_found_report(report_number)
+        # save_not_found_report(report_number)
         sheets_handler.save_not_found(report_number)
         # Persist progress: next search = this report + 1
         try:
@@ -143,7 +143,7 @@ def _make_callbacks(cfg: dict):
         _error_count   += 1
         print(f"   [ERROR FINAL] {report_number}: {error_msg[:80]}")
         sheets_handler.save_error(report_number, error_msg)
-        save_not_found_report(f"ERROR:{report_number}")
+        # save_not_found_report(f"ERROR:{report_number}")
         # Persist progress even on error: next search = this report + 1
         try:
             _save_progress_everywhere(int(report_number) + 1)
@@ -511,7 +511,7 @@ def main():
                 _searches_done, _elapsed(),
                 _not_found_count, _error_count
             )
-            get_summary()
+            # get_summary()
  
             # ── Auto-trigger recheck after normal search ──────────
             print("\n" + "=" * 60)
@@ -541,12 +541,12 @@ def main():
 
         elif outcome == "timeout":
             print(f"\n[EXIT] Auto-terminated after {MAX_RUN_HOURS}h")
-            get_summary()
+            # get_summary()
             break
 
         elif outcome in ("stop", "consecutive_errors", "crash"):
             print(f"\n[EXIT] Reason: {outcome}")
-            get_summary()
+            # get_summary()
             break
 
 
