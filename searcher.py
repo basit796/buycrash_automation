@@ -17,6 +17,7 @@ import time
 import random
 import pickle
 import threading
+import subprocess
 import requests
 from seleniumbase import SB
 from config import (
@@ -33,6 +34,15 @@ from config import (
 # How long (seconds) to wait for a browser login before giving up.
 # This prevents the script from hanging forever on a frozen browser.
 LOGIN_TIMEOUT_SEC = 300  # 5 minutes
+
+
+def _kill_stale_chrome():
+    """Kill leftover Chrome/Chromium processes owned by this user to free file descriptors."""
+    for name in ("chrome", "chromium", "chromedriver", "undetected_chromedriver"):
+        try:
+            subprocess.run(["pkill", "-f", name], capture_output=True)
+        except Exception:
+            pass
 
 # -------------------------------------------------------------------
 # LIVE SITE KEY
@@ -442,6 +452,7 @@ def _login_via_browser_inner(slot_idx: int, account: dict, otp_timeout_min: int,
           + f"  (timeout={LOGIN_TIMEOUT_SEC}s)...")
 
     sb_proxy = _parse_sb_proxy(proxy)
+    _kill_stale_chrome()
 
     with SB(uc=True, test=False, locale="en", headless=True,
             proxy=sb_proxy) as sb:
