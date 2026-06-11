@@ -197,7 +197,7 @@ def _build_api_session(cookie_dict: dict, user_agent: str = None,
         "Accept-Language":     "en",
         "Referer":             SEARCH_PAGE_URL,
         "Origin":              BASE_URL,
-        "lnbc-client-version": "1.0.145",
+        "lnbc-client-version": "1.0.146",
         "x-xsrf-token":        xsrf,
     })
     if proxy:
